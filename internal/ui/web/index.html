@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Arborist</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header>
+  <div class="brand">Arborist</div>
+  <div class="where" id="where"></div>
+  <div class="providers" id="providers"></div>
+</header>
+
+<div class="banner" id="welcome" hidden></div>
+
+<nav class="bar">
+  <div class="crumbs" id="crumbs"></div>
+  <div class="actions">
+    <button id="btn-scan" title="Find absolute paths that point into this folder or out of it">Scan references</button>
+    <button id="btn-analyze" class="primary">Analyze with AI</button>
+  </div>
+</nav>
+
+<main>
+  <section class="files">
+    <table id="files">
+      <thead><tr>
+        <th>Name</th><th class="ai">What it is</th><th class="ai">Status</th>
+        <th class="num">Size</th><th>Modified</th>
+        <th class="num" title="References from other places into this entry">Refs in</th>
+        <th class="num" title="References from inside this entry to the workspace">Refs out</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    <p class="empty" id="files-empty" hidden>This folder is empty.</p>
+  </section>
+
+  <aside>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="analysis" aria-selected="true">Analysis</button>
+      <button role="tab" data-tab="refs">References</button>
+      <button role="tab" data-tab="preview">Preview</button>
+    </div>
+    <div class="panel" id="tab-analysis"></div>
+    <div class="panel" id="tab-refs" hidden></div>
+    <div class="panel" id="tab-preview" hidden><p class="muted">Select a file to preview it.</p></div>
+  </aside>
+</main>
+
+<footer id="jobs"></footer>
+<script src="app.js"></script>
+</body>
+</html>

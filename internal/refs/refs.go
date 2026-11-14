@@ -29,7 +29,8 @@ type Ref struct {
 
 // Options controls a scan.
 type Options struct {
-	MaxFileSize int64 // text files larger than this are skipped
+	MaxFileSize int64  // text files larger than this are skipped
+	Sub         string // only walk this subfolder of root (references are still relative to root)
 	Workers     int
 }
 
@@ -97,7 +98,7 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 		}()
 	}
 
-	walkErr := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+	walkErr := filepath.WalkDir(filepath.Join(root, opt.Sub), func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			mu.Lock()
 			stats.Unreadable++

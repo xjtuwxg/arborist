@@ -1,8 +1,8 @@
-// Command arb is the Arborist CLI. For now it has one subcommand:
+// Command arb is the Arborist CLI.
 //
-//	arb refs <root> [--json] [--max-size bytes]
-//
-// which reports absolute path references pointing into <root>.
+//	arb refs <root> [--json] [--max-size bytes]   report absolute path references pointing into <root>
+//	arb ui [root] [--listen addr] [--tailscale]   serve the web interface
+//	arb whatif <root> --refs scan.json            what a plain mv of the AI's proposals would break
 package main
 
 import (
@@ -17,19 +17,22 @@ import (
 )
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "ui" {
+		runUI(os.Args[2:])
+		return
+	}
+	if len(os.Args) >= 2 && os.Args[1] == "whatif" {
+		runWhatIf(os.Args[2:])
+		return
+	}
 	if len(os.Args) < 2 || os.Args[1] != "refs" {
-		fmt.Fprintln(os.Stderr, "usage: arb refs <root> [--json] [--max-size bytes]")
+		fmt.Fprintln(os.Stderr, "usage:\n  arb refs <root> [--json] [--max-size bytes]\n  arb ui [root] [--listen addr] [--tailscale] [--refs scan.json]\n  arb whatif <root> --refs scan.json [--json]")
 		os.Exit(2)
 	}
 	fl := flag.NewFlagSet("refs", flag.ExitOnError)
 	asJSON := fl.Bool("json", false, "print every reference as JSON")
 	maxSize := fl.Int64("max-size", 1<<20, "skip text files larger than this many bytes")
-	// Accept the root before or after the flags.
-	args := os.Args[2:]
-	var root string
-	if len(args) > 0 && args[0][0] != '-' {
-		root, args = args[0], args[1:]
-	}
+	root, args := splitRoot(os.Args[2:])
 	fl.Parse(args)
 	if root == "" {
 		root = fl.Arg(0)
@@ -46,11 +49,18 @@ func main() {
 	}
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", " ")
 		enc.Encode(map[string]any{"stats": stats, "refs": found})
 		return
 	}
 	summarize(found, stats)
+}
+
+// splitRoot lets the root come before the flags.
+func splitRoot(args []string) (string, []string) {
+	if len(args) > 0 && args[0] != "" && args[0][0] != '-' {
+		return args[0], args[1:]
+	}
+	return "", args
 }
 
 func summarize(found []refs.Ref, stats refs.Stats) {
