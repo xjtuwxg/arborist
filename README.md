@@ -26,8 +26,9 @@ go build -o arb ./cmd/arb
 ./arb whatif ~/workspace --refs scan.json
 ```
 
-Nothing here changes the workspace. Arborist writes only to its cache
-directory (`~/.cache/arborist` on Linux).
+The workspace changes only when you approve a dry run in the web interface.
+Even then Arborist only renames: it never overwrites and never deletes on its
+own. Its journal and cache live in `~/.cache/arborist` on Linux.
 
 **Web interface (`arb ui`).** A file browser over one workspace root. It
 prints a link that carries an access token; the token is stored so the link
@@ -36,13 +37,29 @@ stays the same across restarts. Per folder you can:
 - *Scan references*: find absolute paths (symlinks and text files) that point
   into the workspace, see what points into a folder and what its files point
   to, and which references are already dangling.
-- *Analyze with AI*: describe every entry, label it by topic and activity, and
-  propose `move` / `merge` / `archive` steps. Each proposal shows how many
-  references a plain move would break.
+- *Analyze*: describe every entry, label it by topic and activity, and propose
+  `move` / `merge` / `archive` / `trash` steps. Each proposal shows how many
+  references the move would break.
+- *Dry run*: see the folder as it is now next to how it would look, untick
+  steps you do not want, then apply. A plan with any conflict (a destination
+  that already exists, an entry that vanished) is refused as a whole.
+- *History*: every applied plan is journaled; the most recent one can be
+  undone, which puts each entry back at its old path.
+- *Trash*: `trash` steps move entries into `_trash/` at the workspace root.
+  They stay there, intact, until you restore them or delete them one at a
+  time by typing the entry's name. That is the only code path that deletes.
+
+Applying does not repair references yet. The dry run says how many will stop
+resolving; undo restores them.
+
+With `--tailscale` the printed link uses the machine's tailnet address and
+works from any device on the tailnet, no SSH tunnel needed.
 
 **AI without setup.** On start Arborist looks for AI command-line tools that
 are already installed and signed in (Claude Code, Codex, Gemini CLI, opencode,
-Ollama) and uses one of them; there are no API keys to enter. It only checks
+Ollama) and uses one of them; there are no API keys to enter. The sidebar
+lets you pick the provider and the model (suggestions come from the tool where
+it can list them; any model name the tool accepts can be typed). It only checks
 that a tool's credential file exists and never reads it. The tool is run in an
 empty directory with its own tools disabled or read-only, because folder names
 and README text are untrusted input. Analysis sends folder names and the first
@@ -59,11 +76,12 @@ were carried out with a plain `mv`.
 | Piece | Role | Source |
 |---|---|---|
 | Reference graph | what breaks if X moves | `internal/refs` (started) |
-| Transactional move + undo | apply a plan, journal it, roll back | [AgentReRoot](https://github.com/xjtuwxg/AgentReRoot) |
+| Transactional move + undo | apply a plan, journal it, roll back | `internal/ui/apply.go` (renames only); agent-state migration from [AgentReRoot](https://github.com/xjtuwxg/AgentReRoot) to do |
+| Reference repair | rewrite or regenerate what a move breaks | to do |
 | Semantic index | per-file and per-folder summaries and embeddings in a sidecar database, no new file system | to do |
 | Views before moves | show the proposed layout virtually, materialize after review | to do |
 | Agent loop | propose, dry-run, apply, verify | propose only (`internal/providers`) |
-| File manager UI | browse, review proposals, undo | `internal/ui` (browse and review; no apply yet) |
+| File manager UI | browse, review proposals, undo | `internal/ui` |
 
 AgentReRoot keeps its packages under `internal/`, so they cannot be imported
 from this module yet. Either call the `reroot` binary or move its engine to a

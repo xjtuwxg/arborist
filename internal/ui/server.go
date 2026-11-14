@@ -52,7 +52,10 @@ type Server struct {
 
 	cacheDir string
 
+	applyMu sync.Mutex // one apply, undo or trash action at a time
+
 	mu        sync.Mutex
+	txs       []*Tx
 	refs      []refs.Ref
 	scanned   []string // subfolders (relative, "" for the root) with reference data
 	analyses  map[string]*Analysis
@@ -99,6 +102,7 @@ func New(root string) (*Server, error) {
 		Scanned *[]string   `json:"scanned"`
 	}{&s.refs, &s.scanned})
 	s.loadJSON("analyses.json", &s.analyses)
+	s.loadJournal()
 	s.providers = providers.Detect(context.Background())
 	return s, nil
 }
@@ -190,6 +194,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/scan", s.handleScan)
 	mux.HandleFunc("POST /api/analyze", s.handleAnalyze)
 	mux.HandleFunc("POST /api/providers/refresh", s.handleRefresh)
+	mux.HandleFunc("POST /api/plan", s.handlePlan)
+	mux.HandleFunc("POST /api/apply", s.handleApply)
+	mux.HandleFunc("GET /api/history", s.handleHistory)
+	mux.HandleFunc("POST /api/undo", s.handleUndo)
+	mux.HandleFunc("GET /api/trash", s.handleTrash)
+	mux.HandleFunc("POST /api/trash/restore", s.handleTrashRestore)
+	mux.HandleFunc("POST /api/trash/delete", s.handleTrashDelete)
 	return s.auth(mux)
 }
 
@@ -264,7 +275,7 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	writeJSON(w, map[string]any{"root": s.Root, "host": host, "providers": s.providers, "refs": len(s.refs), "scanned": s.scanned})
+	writeJSON(w, map[string]any{"root": s.Root, "host": host, "providers": s.providers, "refs": len(s.refs), "scanned": s.scanned, "trash": len(s.trashItems())})
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {

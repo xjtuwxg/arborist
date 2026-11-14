@@ -73,6 +73,9 @@ func digest(abs string) (string, error) {
 		des = des[:maxChildren]
 	}
 	for _, d := range des {
+		if d.Name() == trashName {
+			continue
+		}
 		p := filepath.Join(abs, d.Name())
 		info, err := os.Stat(p)
 		if err != nil {
@@ -127,14 +130,17 @@ Answer with one JSON object and nothing else:
 {
  "summary": "2-3 sentences: what this folder holds and what is wrong with its organization",
  "items": [{"name": "<child name exactly as listed, without trailing slash>", "what": "one short phrase", "category": "short topic label", "status": "active|dormant|dead|unknown"}],
- "proposals": [{"op": "move|merge|archive", "from": ["<child name>", ...], "to": "<target path relative to this folder>", "reason": "one sentence"}]
+ "proposals": [{"op": "move|merge|archive|trash", "from": ["<child name>", ...], "to": "<destination folder relative to this folder>", "reason": "one sentence"}]
 }
 
 Rules: one item per listed child. Use few, consistent category labels. Propose
 only changes with a clear benefit: group children by topic with "move", combine
-near-duplicates with "merge", and "archive" what is clearly dead (to
-"_archive/<name>"). If the folder is already well organized, return an empty
-proposals list. Today is %s.
+near-duplicates with "merge". "to" is always a folder that the children are
+moved into under their own names; never rename anything. "archive" is for work
+that is clearly dead but may matter again; "trash" is only for entries with no
+value at all (empty folders, stray temporary files). Both need no "to".
+Nothing is ever deleted: trashed entries wait for the user's review. If the
+folder is already well organized, return an empty proposals list. Today is %s.
 
 Folder: %s
 `
@@ -156,6 +162,9 @@ func (s *Server) impact(base string, from []string) *Impact {
 		if !s.isScanned(p) {
 			im.Scanned = false
 		}
+		if _, err := os.Lstat(filepath.Join(s.Root, p)); err != nil {
+			continue // already moved
+		}
 		for _, ref := range s.refs {
 			if ref.Dangling || !under(ref.Target, p) {
 				continue
@@ -172,7 +181,7 @@ func (s *Server) impact(base string, from []string) *Impact {
 }
 
 func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
-	var req struct{ Path, Provider string }
+	var req struct{ Path, Provider, Model string }
 	if err := readBody(r, &req); err != nil {
 		fail(w, http.StatusBadRequest, err)
 		return
@@ -206,7 +215,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), analyzeBudget)
 		defer cancel()
-		answer, err := providers.Run(ctx, *prov, fmt.Sprintf(promptHead, time.Now().Format("2006-01-02"), shown)+facts)
+		answer, err := providers.Run(ctx, *prov, req.Model, fmt.Sprintf(promptHead, time.Now().Format("2006-01-02"), shown)+facts)
 		if err != nil {
 			return err
 		}
@@ -214,14 +223,18 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		a := &Analysis{Provider: prov.Name, At: time.Now()}
+		label := prov.Name
+		if req.Model != "" {
+			label += " (" + req.Model + ")"
+		}
+		a := &Analysis{Provider: label, At: time.Now()}
 		if err := json.Unmarshal([]byte(raw), a); err != nil {
 			return fmt.Errorf("could not read the model's JSON: %w", err)
 		}
 		// Keep only proposals about children that exist; the model's output is untrusted.
 		kept := a.Proposals[:0]
 		for _, p := range a.Proposals {
-			ok := len(p.From) > 0 && (p.Op == "move" || p.Op == "merge" || p.Op == "archive")
+			ok := len(p.From) > 0 && (p.Op == "move" || p.Op == "merge" || p.Op == "archive" || p.Op == "trash")
 			for i, f := range p.From {
 				f = strings.Trim(f, "/")
 				p.From[i] = f
@@ -232,7 +245,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			p.To = strings.Trim(filepath.ToSlash(filepath.Clean("/"+p.To)), "/")
-			if ok && p.To != "" {
+			if ok && (p.To != "" || p.Op == "archive" || p.Op == "trash") {
 				kept = append(kept, p)
 			}
 		}

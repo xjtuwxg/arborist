@@ -31,7 +31,8 @@ type Provider struct {
 	Version string   `json:"version"`
 	Ready   bool     `json:"ready"`
 	Note    string   `json:"note,omitempty"`
-	Models  []string `json:"models,omitempty"`
+	Models  []string `json:"models,omitempty"`  // suggestions; any model name the tool accepts may be used
+	Default string   `json:"default,omitempty"` // the tool's own configured model, when known
 }
 
 type spec struct {
@@ -122,6 +123,27 @@ func Detect(ctx context.Context) []Provider {
 			if v := strings.SplitN(output(ctx, path, "--version"), "\n", 2)[0]; v != "" && !strings.HasPrefix(v, "Warning") {
 				p.Version = v
 			}
+			switch s.id {
+			case "claude":
+				p.Models = []string{"opus", "sonnet", "haiku"}
+			case "codex":
+				// The model line of config.toml is a preference, not a credential.
+				if b, err := os.ReadFile(filepath.Join(home, ".codex/config.toml")); err == nil {
+					for _, line := range strings.Split(string(b), "\n") {
+						if k, v, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == "model" {
+							p.Default = strings.Trim(strings.TrimSpace(v), `"'`)
+							p.Models = []string{p.Default}
+							break
+						}
+					}
+				}
+			case "opencode":
+				for _, line := range strings.Split(output(ctx, path, "models"), "\n") {
+					if line = strings.TrimSpace(line); line != "" && !strings.Contains(line, " ") {
+						p.Models = append(p.Models, line)
+					}
+				}
+			}
 			if s.id == "ollama" {
 				for _, line := range strings.Split(output(ctx, path, "list"), "\n")[1:] {
 					if f := strings.Fields(line); len(f) > 0 {
@@ -167,7 +189,9 @@ func Detect(ctx context.Context) []Provider {
 // started in an empty directory with its own tools switched off or read-only:
 // the prompt contains file names and README text from the workspace, which is
 // untrusted, so the model must not be able to act on it.
-func Run(ctx context.Context, p Provider, prompt string) (string, error) {
+//
+// model may be empty, meaning the tool's own default.
+func Run(ctx context.Context, p Provider, model, prompt string) (string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
 		return "", err
@@ -176,12 +200,23 @@ func Run(ctx context.Context, p Provider, prompt string) (string, error) {
 	if err := os.MkdirAll(sandbox, 0o700); err != nil {
 		return "", err
 	}
+	if strings.HasPrefix(model, "-") {
+		return "", fmt.Errorf("invalid model name %q", model)
+	}
+	// with adds the model flag when a model was chosen.
+	with := func(flag string) []string {
+		if model == "" {
+			return nil
+		}
+		return []string{flag, model}
+	}
 	var args []string
 	stdin := prompt
 	var lastMsg string
 	switch p.ID {
 	case "claude":
 		args = []string{"-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text"}
+		args = append(args, with("--model")...)
 	case "codex":
 		f, err := os.CreateTemp(sandbox, "codex-*.txt")
 		if err != nil {
@@ -190,16 +225,20 @@ func Run(ctx context.Context, p Provider, prompt string) (string, error) {
 		f.Close()
 		lastMsg = f.Name()
 		defer os.Remove(lastMsg)
-		args = []string{"exec", "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "-o", lastMsg, "-"}
+		args = append([]string{"exec"}, with("-m")...)
+		args = append(args, "--sandbox", "read-only", "--skip-git-repo-check", "--ephemeral", "-o", lastMsg, "-")
 	case "gemini":
-		args, stdin = []string{"-p", prompt}, ""
+		args, stdin = append(with("-m"), "-p", prompt), ""
 	case "opencode":
-		args, stdin = []string{"run", prompt}, ""
+		args, stdin = append(append([]string{"run"}, with("-m")...), prompt), ""
 	case "ollama":
 		if len(p.Models) == 0 {
 			return "", errors.New("ollama has no models")
 		}
-		args = []string{"run", p.Models[0]}
+		if model == "" {
+			model = p.Models[0]
+		}
+		args = []string{"run", model}
 	default:
 		return "", fmt.Errorf("unknown provider %q", p.ID)
 	}
