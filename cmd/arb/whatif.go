@@ -48,6 +48,8 @@ func runWhatIf(args []string) {
 		os.Exit(1)
 	}
 
+	refs.Recategorize(scan.Refs)
+
 	type row struct {
 		Folder   string         `json:"folder"`
 		Op       string         `json:"op"`

@@ -29,7 +29,7 @@ type Ref struct {
 	Line     int    `json:"line"`     // 0 for symlinks
 	Target   string `json:"target"`   // relative to root
 	Kind     string `json:"kind"`     // "symlink" or "text"
-	Category string `json:"category"` // where the referring file lives
+	Category string `json:"category"` // what kind of file refers: authored, build, python-env, node, git, agent, log, data
 	Cross    bool   `json:"cross"`    // target is in another top-level project
 	Dangling bool   `json:"dangling"` // target does not exist right now
 }
@@ -219,7 +219,7 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 		wg    sync.WaitGroup
 	)
 	add := func(r Ref) {
-		r.Category = categorize(r.File)
+		r.Category = Categorize(r.File)
 		r.Cross = topLevel(r.File) != topLevel(r.Target)
 		_, err := os.Lstat(filepath.Join(root, r.Target))
 		r.Dangling = err != nil
@@ -455,11 +455,14 @@ func topLevel(rel string) string {
 	return rel
 }
 
-// categorize says what kind of place the referring file lives in, because
-// that decides how a broken reference gets repaired: regenerated state can be
-// rebuilt, hand-written files have to be rewritten.
-func categorize(rel string) string {
+// Categorize says what kind of file a reference lives in, because that
+// decides what a move has to do about it: authored files need an edit, build
+// output and environments can be regenerated, logs and recorded data describe
+// the past. It looks only at the path, so stored scans can be reclassified
+// without reading the disk again.
+func Categorize(rel string) string {
 	base := filepath.Base(rel)
+	kind := ""
 	for _, part := range strings.Split(filepath.Dir(rel), "/") {
 		switch part {
 		case ".git":
@@ -468,19 +471,47 @@ func categorize(rel string) string {
 			return "node"
 		case "venv", ".venv", "env", ".env", "site-packages", ".conda", "conda-meta", "__pycache__":
 			return "python-env"
-		case "build", "target", "dist", "out", "CMakeFiles", ".cache", "_build", ".ccache":
+		case "build", "target", "dist", "out", "CMakeFiles", ".cache", "_build", ".ccache", ".deps", "autom4te.cache":
 			return "build"
 		case ".claude", ".codex", ".cursor":
 			return "agent"
+		case "meson-info", "meson-private", "cache":
+			return "build"
+		case "logs", "log":
+			kind = "log"
+		case "data", "dataset", "datasets", "results", "runs", "output", "outputs", "sessions", "traces":
+			if kind == "" {
+				kind = "data"
+			}
+		}
+		if strings.HasPrefix(part, "build-") || strings.HasPrefix(part, "cmake-build-") {
+			return "build"
 		}
 	}
+	ext := strings.ToLower(filepath.Ext(base))
 	switch {
-	case base == "CMakeCache.txt" || base == "compile_commands.json" || strings.HasSuffix(base, ".d") || strings.HasSuffix(base, ".cmake"):
+	case base == "CMakeCache.txt" || base == "compile_commands.json" || base == ".depend" || base == "config.status" ||
+		base == "build.ninja" || strings.HasPrefix(base, ".ninja_") ||
+		base == "libtool" || base == "Makefile.objects" || base == "Makefile.fragments" ||
+		ext == ".d" || ext == ".dep" || ext == ".po" || ext == ".plo" || ext == ".cmake" || ext == ".la" || ext == ".lo" || ext == ".pc" ||
+		(strings.HasPrefix(base, ".") && ext == ".cmd"): // kernel build: .foo.o.cmd
 		return "build"
 	case base == "CLAUDE.md" || base == "AGENTS.md":
 		return "agent"
-	case strings.HasSuffix(base, ".log") || strings.HasSuffix(base, ".out"):
+	case ext == ".log" || ext == ".out" || base == "config.log":
 		return "log"
+	case ext == ".csv" || ext == ".tsv" || ext == ".jsonl" || ext == ".ndjson":
+		return "data"
+	}
+	if kind != "" {
+		return kind
 	}
 	return "authored"
+}
+
+// Recategorize brings the categories of a stored scan up to date.
+func Recategorize(found []Ref) {
+	for i := range found {
+		found[i].Category = Categorize(found[i].File)
+	}
 }

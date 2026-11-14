@@ -116,3 +116,27 @@ func TestCacheAndIgnore(t *testing.T) {
 		t.Error("IgnoredPath")
 	}
 }
+
+func TestCategorize(t *testing.T) {
+	for file, want := range map[string]string{
+		"p/src/main.c":                     "authored",
+		"p/run.sh":                         "authored",
+		"p/build-static/meson-info/x.json": "build",
+		"p/src/foo.dep":                    "build",
+		"p/Makefile":                       "authored",
+		"p/src/.depend":                    "build",
+		"k/tools/objtool/.check.o.cmd":     "build",
+		"p/scripts/deploy.cmd":             "authored",
+		"p/eval/all.csv":                   "data",
+		"p/dataset/sessions/a.jsonl":       "data",
+		"p/runs/r0/result.json":            "data",
+		"p/runs/r0/logs/stderr.txt":        "log",
+		"p/data/.venv/bin/activate":        "python-env",
+		"p/.claude/settings.local.json":    "agent",
+		"p/results/CLAUDE.md":              "agent",
+	} {
+		if got := Categorize(file); got != want {
+			t.Errorf("%s: got %s, want %s", file, got, want)
+		}
+	}
+}

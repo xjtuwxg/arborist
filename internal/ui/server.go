@@ -101,6 +101,7 @@ func New(root string) (*Server, error) {
 		Refs    *[]refs.Ref `json:"refs"`
 		Scanned *[]string   `json:"scanned"`
 	}{&s.refs, &s.scanned})
+	refs.Recategorize(s.refs)
 	s.loadJSON("analyses.json", &s.analyses)
 	s.loadJournal()
 	s.providers = providers.Detect(context.Background())
@@ -143,6 +144,7 @@ func (s *Server) LoadRefs(file string) error {
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return err
 	}
+	refs.Recategorize(doc.Refs)
 	s.mu.Lock()
 	s.refs, s.scanned = doc.Refs, []string{""}
 	s.mu.Unlock()

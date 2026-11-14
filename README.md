@@ -88,7 +88,9 @@ lines of README files to the chosen tool.
 
 **Measurement (`arb refs`, `arb whatif`).** `refs` reports every absolute
 reference with the kind of file it lives in (`authored`, `build`,
-`python-env`, `node`, `git`, `agent`, `log`). `whatif` takes the AI proposals
+`python-env`, `node`, `git`, `agent`, `log`, `data`). The kind comes from the
+path alone, so `arb refs --from scan.json` re-summarizes a stored scan under
+the current rules without touching the disk. `whatif` takes the AI proposals
 stored by the UI and counts the references that would stop resolving if they
 were carried out with a plain `mv`.
 

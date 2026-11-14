@@ -28,7 +28,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 || os.Args[1] != "refs" {
-		fmt.Fprintln(os.Stderr, "usage:\n  arb refs <root> [--json] [--ignore patterns] [--no-cache]\n  arb ui [root] [--listen addr] [--tailscale] [--refs scan.json]\n  arb whatif <root> --refs scan.json [--json]")
+		fmt.Fprintln(os.Stderr, "usage:\n  arb refs <root> [--json] [--ignore patterns] [--no-cache]\n  arb refs --from scan.json\n  arb ui [root] [--listen addr] [--tailscale] [--refs scan.json]\n  arb whatif <root> --refs scan.json [--json]")
 		os.Exit(2)
 	}
 	fl := flag.NewFlagSet("refs", flag.ExitOnError)
@@ -36,8 +36,30 @@ func main() {
 	maxSize := fl.Int64("max-size", 1<<20, "skip text files larger than this many bytes")
 	ignore := fl.String("ignore", "", "comma-separated patterns to leave out, in addition to the workspace's .arboristignore")
 	noCache := fl.Bool("no-cache", false, "read every file again instead of reusing unchanged folders")
+	from := fl.String("from", "", "summarize a stored `scan.json` with the current categories instead of scanning")
 	root, args := splitRoot(os.Args[2:])
 	fl.Parse(args)
+	if *from != "" {
+		var scan struct {
+			Stats refs.Stats `json:"stats"`
+			Refs  []refs.Ref `json:"refs"`
+		}
+		f, err := os.Open(*from)
+		if err == nil {
+			err = json.NewDecoder(f).Decode(&scan)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "arb refs:", err)
+			os.Exit(1)
+		}
+		refs.Recategorize(scan.Refs)
+		if *asJSON {
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"stats": scan.Stats, "refs": scan.Refs})
+			return
+		}
+		summarize(scan.Refs, scan.Stats)
+		return
+	}
 	if root == "" {
 		root = fl.Arg(0)
 	}
