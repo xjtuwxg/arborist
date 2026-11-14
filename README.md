@@ -26,7 +26,7 @@ go build -o arb ./cmd/arb
 ./arb whatif ~/workspace --refs scan.json
 ```
 
-The workspace changes only when you approve a dry run in the web interface.
+The workspace changes only when you confirm the preview in the web interface.
 Even then Arborist only renames: it never overwrites and never deletes on its
 own. Its journal and cache live in `~/.cache/arborist` on Linux.
 
@@ -40,7 +40,7 @@ stays the same across restarts. Per folder you can:
 - *Analyze*: describe every entry, label it by topic and activity, and propose
   `move` / `merge` / `archive` / `trash` steps. Each proposal shows how many
   references the move would break.
-- *Dry run*: see the folder as it is now next to how it would look, untick
+- *Tidy up*: see the folder as it is now next to how it would look, untick
   steps you do not want, then apply. A plan with any conflict (a destination
   that already exists, an entry that vanished) is refused as a whole.
 - *History*: every applied plan is journaled; the most recent one can be

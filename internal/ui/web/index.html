@@ -24,7 +24,8 @@
     <div class="ai">
       <div class="label">AI</div>
       <label class="field"><span>Provider</span><select id="provider"></select></label>
-      <label class="field"><span>Model</span><input id="model" list="models" placeholder="Default" autocomplete="off" spellcheck="false"><datalist id="models"></datalist></label>
+      <label class="field"><span>Model</span><select id="model"></select></label>
+      <label class="field" id="model-other" hidden><span>Model name</span><input id="model-custom" placeholder="Name the tool accepts" autocomplete="off" spellcheck="false"></label>
       <p class="hint" id="ai-hint"></p>
       <button class="ghost" id="btn-rescan-ai">Look for AI tools again</button>
     </div>
@@ -37,7 +38,7 @@
         <button id="btn-ignore" class="ghost" hidden></button>
         <button id="btn-scan"><span class="ico" data-icon="scan"></span><span>Scan references</span></button>
         <button id="btn-analyze"><span class="ico" data-icon="spark"></span><span>Analyze</span></button>
-        <button id="btn-dry" class="primary" disabled><span class="ico" data-icon="split"></span><span>Dry run</span></button>
+        <button id="btn-dry" class="primary" disabled><span class="ico" data-icon="split"></span><span>Tidy up…</span></button>
       </div>
     </header>
 
@@ -79,7 +80,7 @@
   <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dry-title">
     <header>
       <div>
-        <h2 id="dry-title">Dry run</h2>
+        <h2 id="dry-title">Review before tidying</h2>
         <p class="muted" id="dry-sub"></p>
       </div>
       <button class="ghost" id="dry-close" aria-label="Close">Close</button>

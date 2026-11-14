@@ -87,6 +87,8 @@ function toast(msg, opt = {}) {
 
 const current = () => state.providers.find((p) => p.id === state.provider);
 const modelKey = () => 'arborist.model.' + state.provider;
+const OTHER = '\u0000other';
+const modelValue = () => ($('#model').value === OTHER ? $('#model-custom').value.trim() : $('#model').value);
 
 function pickProvider() {
   const ready = state.providers.filter((p) => p.ready);
@@ -102,14 +104,21 @@ function renderAI() {
   sel.disabled = !state.provider;
   const p = current();
   const model = $('#model');
+  const saved = p ? store.get(modelKey()) || '' : '';
+  const listed = (p && p.models) || [];
+  const other = saved !== '' && !listed.includes(saved);
   model.disabled = !p;
-  model.value = p ? store.get(modelKey()) || '' : '';
-  model.placeholder = p && p.default ? `Default (${p.default})` : 'Default';
-  fill($('#models'), ((p && p.models) || []).map((m) => h('option', { value: m })));
+  fill(model, [
+    h('option', { value: '', selected: saved === '' }, p && p.default ? `Default (${p.default})` : 'Default'),
+    ...listed.map((m) => h('option', { value: m, selected: m === saved }, m)),
+    h('option', { value: OTHER, selected: other }, 'Other…'),
+  ]);
+  $('#model-other').hidden = !other;
+  $('#model-custom').value = other ? saved : '';
   let hint = 'No AI tool found. Browsing and reference scans still work.';
   if (p) {
     hint = `Using your ${p.name} sign-in on this machine` + (p.version ? ` (${p.version.replace(/\s*\(.*\)/, '')})` : '') +
-      '. Any model name the tool accepts can be typed.';
+      '.';
   } else if (state.providers.length) {
     hint = 'AI tools are installed but none is signed in. Sign in from a terminal, then look again.';
   }
@@ -122,7 +131,13 @@ $('#provider').addEventListener('change', (ev) => {
   store.set('arborist.provider', state.provider);
   renderAI();
 });
-$('#model').addEventListener('change', (ev) => store.set(modelKey(), ev.target.value.trim()));
+$('#model').addEventListener('change', (ev) => {
+  const other = ev.target.value === OTHER;
+  $('#model-other').hidden = !other;
+  if (other) $('#model-custom').focus();
+  store.set(modelKey(), modelValue());
+});
+$('#model-custom').addEventListener('change', () => store.set(modelKey(), modelValue()));
 $('#btn-rescan-ai').addEventListener('click', async () => {
   state.providers = await api('/api/providers/refresh', {});
   pickProvider();
@@ -137,7 +152,7 @@ function renderWelcome() {
   if (!ready.length) return;
   fill(box, h('p', {}, `Found ${plural(ready.length, 'AI tool')} already signed in on this machine: ` +
     ready.map((p) => p.name).join(', ') + `. Arborist will use ${current().name}; change the provider or model in the sidebar. ` +
-    'Analysis sends folder names and the first lines of README files to that tool. Nothing moves until you approve a dry run, and nothing is ever deleted without a second confirmation.'),
+    'Analysis sends folder names and the first lines of README files to that tool. Nothing moves until you confirm a preview, and nothing is ever deleted without a second confirmation.'),
   h('button', { onclick: () => { box.hidden = true; store.set('arborist.welcomed', '1'); } }, 'Got it'));
   box.hidden = false;
 }
@@ -185,7 +200,7 @@ function renderActions() {
   ig.title = 'Scans skip excluded folders. The list is the .arboristignore file in the workspace root.';
   $('#btn-scan').disabled = !!(state.listing && state.listing.ignored);
   $('#btn-dry').disabled = !(a && a.proposals && a.proposals.length);
-  $('#btn-dry').title = $('#btn-dry').disabled ? 'Analyze this folder first' : 'See the folder before and after, then decide';
+  $('#btn-dry').title = $('#btn-dry').disabled ? 'Analyze this folder first' : 'Preview the reorganized folder next to the current one. Nothing moves until you confirm.';
 }
 
 async function go(path) {
@@ -271,7 +286,7 @@ function renderAnalysis() {
   const a = state.listing.analysis;
   if (!a) {
     fill(box, h('p', { class: 'muted' }, state.provider
-      ? 'This folder has not been analyzed. Analyze describes each entry and proposes how to reorganize it. Nothing moves until you approve a dry run.'
+      ? 'This folder has not been analyzed. Analyze describes each entry and proposes how to reorganize it. Nothing moves until you confirm a preview.'
       : 'No signed-in AI tool was found on this machine, so analysis is unavailable.'));
     return;
   }
@@ -405,12 +420,12 @@ async function refreshDry() {
   fill($('#dry-summary'), lines);
   const btn = $('#dry-apply');
   btn.disabled = plan.conflicts.length > 0 || plan.moves.length === 0;
-  btn.textContent = plan.conflicts.length ? 'Resolve conflicts first' : `Apply ${plural(plan.moves.length, 'move')}`;
+  btn.textContent = plan.conflicts.length ? 'Resolve conflicts first' : `Move ${plural(plan.moves.length, 'entry', 'entries')}`;
 }
 
 async function openDry() {
   dry.selected = state.listing.analysis.proposals.map((_, i) => i);
-  $('#dry-sub').textContent = `${state.path || rootName()} · untick steps you do not want`;
+  $('#dry-sub').textContent = `${state.path || rootName()} · nothing has moved yet. Untick the steps you do not want, then confirm.`;
   $('#dry').hidden = false;
   await refreshDry();
   $('#dry-apply').focus();
@@ -573,7 +588,7 @@ $('#btn-ignore').addEventListener('click', async () => {
 });
 $('#btn-analyze').addEventListener('click', () => {
   showTab('analysis');
-  startJob('analyze', { path: state.path, provider: state.provider, model: $('#model').value.trim() });
+  startJob('analyze', { path: state.path, provider: state.provider, model: modelValue() });
 });
 
 // ---- start ----------------------------------------------------------------
