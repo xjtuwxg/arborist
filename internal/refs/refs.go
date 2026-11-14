@@ -6,10 +6,17 @@
 package refs
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/sha1"
+	"encoding/binary"
+	"encoding/gob"
+	"encoding/hex"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,17 +38,153 @@ type Ref struct {
 type Options struct {
 	MaxFileSize int64             // text files larger than this are skipped
 	Sub         string            // only walk this subfolder of root (references are still relative to root)
+	Workers     int               // files read in parallel
+	Ignore      []string          // patterns of folders and files to leave out, see Ignored
+	Cache       string            // file that remembers earlier scans; empty means scan everything
 	Progress    func(files int64) // called now and then with the number of files seen so far
-	Workers     int
 }
 
 // Stats counts what the scan looked at.
 type Stats struct {
 	Files      int64 `json:"files"`
-	Scanned    int64 `json:"scanned"`
-	SkippedBig int64 `json:"skipped_big"`
-	SkippedBin int64 `json:"skipped_binary"`
+	Scanned    int64 `json:"scanned"`        // files opened and read
+	Reused     int64 `json:"reused"`         // files in folders unchanged since the last scan
+	Ignored    int64 `json:"ignored"`        // folders and files left out by ignore patterns
+	SkippedBig int64 `json:"skipped_big"`    // larger than MaxFileSize
+	SkippedBin int64 `json:"skipped_binary"` // binary by extension or content
 	Unreadable int64 `json:"unreadable"`
+}
+
+// IgnoreFile is the name of the per-workspace ignore list, one pattern per
+// line, kept in the workspace root.
+const IgnoreFile = ".arboristignore"
+
+// LoadIgnore reads the ignore patterns of a workspace. A missing file means
+// no patterns.
+func LoadIgnore(root string) []string {
+	b, err := os.ReadFile(filepath.Join(root, IgnoreFile))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		if line = strings.TrimSpace(line); line != "" && !strings.HasPrefix(line, "#") {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// Anchored returns the root-relative path of a pattern that names one place
+// ("/data" or "data/trees"), or "" for a pattern that matches a name
+// anywhere ("node_modules", "*.ckpt").
+func Anchored(pattern string) string {
+	p := strings.Trim(pattern, "/")
+	if strings.HasPrefix(pattern, "/") || strings.Contains(p, "/") {
+		return p
+	}
+	return ""
+}
+
+// Ignored reports whether the entry at rel (relative to the root) matches a
+// pattern. Both kinds of pattern may use shell wildcards.
+func Ignored(patterns []string, rel string) bool {
+	name := path.Base(rel)
+	for _, p := range patterns {
+		if a := Anchored(p); a != "" {
+			if ok, _ := path.Match(a, rel); ok || a == rel {
+				return true
+			}
+		} else if ok, _ := path.Match(strings.Trim(p, "/"), name); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// IgnoredPath reports whether rel or any folder above it is ignored.
+func IgnoredPath(patterns []string, rel string) bool {
+	for p := rel; p != "" && p != "."; p = path.Dir(p) {
+		if Ignored(patterns, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// CacheDir is where Arborist keeps what it knows about a workspace root.
+func CacheDir(root string) (string, error) {
+	cache, err := os.UserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	h := sha1.Sum([]byte(root))
+	return filepath.Join(cache, "arborist", hex.EncodeToString(h[:6])), nil
+}
+
+// The scan cache works per folder. A folder's fingerprint covers the name,
+// size and modification time of each regular file directly in it. When the
+// fingerprint is unchanged, the references found in those files last time
+// are reused and none of the files is opened.
+type cachedRef struct {
+	Name   string // file name within the folder
+	Line   int
+	Target string
+}
+
+type cachedDir struct {
+	Fp   uint64
+	Refs []cachedRef
+}
+
+type scanCache struct {
+	Version     int
+	Root        string
+	MaxFileSize int64
+	Dirs        map[string]*cachedDir // keyed by folder path relative to the root
+}
+
+const cacheVersion = 1
+
+func loadCache(file, root string, max int64) map[string]*cachedDir {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var c scanCache
+	if gob.NewDecoder(bufio.NewReader(f)).Decode(&c) != nil || c.Version != cacheVersion || c.Root != root || c.MaxFileSize != max {
+		return nil
+	}
+	return c.Dirs
+}
+
+func saveCache(file, root string, max int64, dirs map[string]*cachedDir) error {
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		return err
+	}
+	tmp := file + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	w := bufio.NewWriter(f)
+	err = gob.NewEncoder(w).Encode(scanCache{Version: cacheVersion, Root: root, MaxFileSize: max, Dirs: dirs})
+	if err == nil {
+		err = w.Flush()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		os.Remove(tmp) // our own temporary file
+		return err
+	}
+	return os.Rename(tmp, file)
+}
+
+func underDir(p, dir string) bool {
+	return dir == "" || p == dir || strings.HasPrefix(p, dir+"/")
 }
 
 // Scan walks root and returns every absolute reference into root.
@@ -56,7 +199,18 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 	if opt.Workers <= 0 {
 		opt.Workers = runtime.NumCPU()
 	}
+	sub := strings.Trim(filepath.ToSlash(filepath.Clean("/"+opt.Sub)), "/")
+	if _, err := os.Stat(filepath.Join(root, sub)); err != nil {
+		return nil, Stats{}, err
+	}
 	needle := []byte(root + "/")
+
+	var old map[string]*cachedDir
+	if opt.Cache != "" {
+		old = loadCache(opt.Cache, root, opt.MaxFileSize)
+	}
+	fresh := map[string]*cachedDir{} // every folder visited by this scan
+	rescanned := map[string]bool{}   // of those, the ones whose files were read
 
 	var (
 		mu    sync.Mutex
@@ -73,87 +227,142 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 		out = append(out, r)
 		mu.Unlock()
 	}
+	count := func(n *int64, by int64) {
+		mu.Lock()
+		*n += by
+		mu.Unlock()
+	}
 
-	paths := make(chan string, 256)
+	type job struct{ abs, rel string }
+	jobs := make(chan job, 256)
 	for i := 0; i < opt.Workers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for p := range paths {
-				rel, _ := filepath.Rel(root, p)
-				hits, status := scanFile(p, needle, opt.MaxFileSize)
-				mu.Lock()
+			for j := range jobs {
+				hits, status := scanFile(j.abs, needle, opt.MaxFileSize)
 				switch status {
 				case statusBinary:
-					stats.SkippedBin++
+					count(&stats.SkippedBin, 1)
 				case statusUnreadable:
-					stats.Unreadable++
+					count(&stats.Unreadable, 1)
 				default:
-					stats.Scanned++
+					count(&stats.Scanned, 1)
 				}
-				mu.Unlock()
 				for _, h := range hits {
-					add(Ref{File: rel, Line: h.line, Target: h.target, Kind: "text"})
+					add(Ref{File: j.rel, Line: h.line, Target: h.target, Kind: "text"})
 				}
 			}
 		}()
 	}
 
-	walkErr := filepath.WalkDir(filepath.Join(root, opt.Sub), func(p string, d fs.DirEntry, err error) error {
+	var seen int64
+	var walk func(rel string)
+	walk = func(rel string) {
+		abs := filepath.Join(root, rel)
+		des, err := os.ReadDir(abs)
 		if err != nil {
-			mu.Lock()
-			stats.Unreadable++
-			mu.Unlock()
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+			count(&stats.Unreadable, 1)
+			return
 		}
-		if d.IsDir() {
-			// Object stores hold no readable paths and dominate file counts.
-			if d.Name() == "objects" && filepath.Base(filepath.Dir(p)) == ".git" {
-				return filepath.SkipDir
-			}
-			return nil
+		type file struct {
+			name string
+			size int64
 		}
-		stats.Files++
-		if opt.Progress != nil && stats.Files%20000 == 0 {
-			opt.Progress(stats.Files)
+		var files []file
+		var subdirs []string
+		fp := fnv.New64a()
+		var num [16]byte
+		for _, d := range des {
+			childRel := path.Join(rel, d.Name())
+			if Ignored(opt.Ignore, childRel) {
+				count(&stats.Ignored, 1)
+				continue
+			}
+			switch {
+			case d.IsDir():
+				// Object stores hold no readable paths and dominate file counts.
+				if d.Name() == "objects" && path.Base(rel) == ".git" {
+					continue
+				}
+				subdirs = append(subdirs, childRel)
+				continue
+			case d.Type()&fs.ModeSymlink != 0:
+				if t, err := os.Readlink(filepath.Join(abs, d.Name())); err == nil && strings.HasPrefix(t, root+"/") {
+					add(Ref{File: childRel, Target: strings.TrimPrefix(t, root+"/"), Kind: "symlink"})
+				}
+			case d.Type().IsRegular():
+				info, err := d.Info()
+				if err != nil {
+					count(&stats.Unreadable, 1)
+					continue
+				}
+				files = append(files, file{d.Name(), info.Size()})
+				fp.Write([]byte(d.Name()))
+				binary.LittleEndian.PutUint64(num[:8], uint64(info.Size()))
+				binary.LittleEndian.PutUint64(num[8:], uint64(info.ModTime().UnixNano()))
+				fp.Write(num[:])
+				fp.Write([]byte{0})
+			default:
+				continue
+			}
+			seen++
+			if opt.Progress != nil && seen%20000 == 0 {
+				opt.Progress(seen)
+			}
 		}
-		rel, _ := filepath.Rel(root, p)
-		switch {
-		case d.Type()&fs.ModeSymlink != 0:
-			t, err := os.Readlink(p)
-			if err == nil && strings.HasPrefix(t, root+"/") {
-				add(Ref{File: rel, Target: strings.TrimPrefix(t, root+"/"), Kind: "symlink"})
+		sum := fp.Sum64()
+		if c := old[rel]; c != nil && c.Fp == sum {
+			fresh[rel] = c
+			count(&stats.Reused, int64(len(files)))
+			for _, r := range c.Refs {
+				add(Ref{File: path.Join(rel, r.Name), Line: r.Line, Target: r.Target, Kind: "text"})
 			}
-		case d.Type().IsRegular():
-			info, err := d.Info()
-			if err != nil {
-				mu.Lock()
-				stats.Unreadable++
-				mu.Unlock()
-				return nil
-			}
-			if info.Size() > opt.MaxFileSize {
-				stats.SkippedBig++
-				return nil
-			}
-			if binaryExt[strings.ToLower(filepath.Ext(p))] {
-				mu.Lock()
-				stats.SkippedBin++
-				mu.Unlock()
-				return nil
-			}
-			if info.Size() >= int64(len(needle)) {
-				paths <- p
+		} else {
+			fresh[rel] = &cachedDir{Fp: sum}
+			rescanned[rel] = true
+			for _, f := range files {
+				switch {
+				case f.size > opt.MaxFileSize:
+					count(&stats.SkippedBig, 1)
+				case binaryExt[strings.ToLower(path.Ext(f.name))]:
+					count(&stats.SkippedBin, 1)
+				case f.size >= int64(len(needle)):
+					jobs <- job{filepath.Join(abs, f.name), path.Join(rel, f.name)}
+				}
 			}
 		}
-		return nil
-	})
-	close(paths)
+		for _, d := range subdirs {
+			walk(d)
+		}
+	}
+	walk(sub)
+	close(jobs)
 	wg.Wait()
-	return out, stats, walkErr
+	stats.Files = seen
+
+	if opt.Cache != "" {
+		for _, r := range out {
+			if dir := path.Dir(r.File); r.Kind == "text" {
+				if dir == "." {
+					dir = ""
+				}
+				if rescanned[dir] {
+					fresh[dir].Refs = append(fresh[dir].Refs, cachedRef{Name: path.Base(r.File), Line: r.Line, Target: r.Target})
+				}
+			}
+		}
+		// Keep what earlier scans learned about folders outside this one.
+		for dir, c := range old {
+			if !underDir(dir, sub) {
+				fresh[dir] = c
+			}
+		}
+		if err := saveCache(opt.Cache, root, opt.MaxFileSize, fresh); err != nil {
+			return out, stats, err
+		}
+	}
+	return out, stats, nil
 }
 
 type hit struct {

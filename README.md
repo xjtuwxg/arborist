@@ -22,7 +22,7 @@ go build -o arb ./cmd/arb
 ./arb ui ~/workspace                 # web interface on 127.0.0.1:7878
 ./arb ui ~/workspace --tailscale     # same, on this machine's Tailscale address
 ./arb refs ~/workspace               # reference summary by category
-./arb refs ~/workspace --json > scan.json
+./arb refs ~/workspace --json > scan.json   # --ignore a,b  --no-cache
 ./arb whatif ~/workspace --refs scan.json
 ```
 
@@ -55,6 +55,19 @@ stays the same across restarts. Per folder you can:
   exact bytes back; a file you changed after the repair is left alone and
   reported. Log files are never rewritten. Repair only knows what the scan
   saw: scan before you reorganize.
+
+**Scans are incremental.** The first scan of a large workspace on a spinning
+disk is slow, because every text file is read. Later scans reuse what was
+found in any folder whose files have the same names, sizes and modification
+times, and open only files in folders that changed. The command line and the
+web interface share the cache (`--no-cache` rereads everything).
+
+**Leaving folders out.** Lines in `.arboristignore` in the workspace root name
+folders and files that scans skip: `/data/trees` is a path from the root,
+`node_modules` or `*.ckpt` match a name anywhere. The web interface has an
+"Exclude from scans" button per folder that edits this file. References
+inside an excluded folder are unknown, so the dry run says when a move
+touches one.
 
 Not repaired yet: paths built at run time, files over the scan's size limit,
 references from outside the workspace (shell rc files, crontab, agent state

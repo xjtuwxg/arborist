@@ -10,7 +10,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/xjtuwxg/arborist/internal/refs"
@@ -26,12 +28,14 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 || os.Args[1] != "refs" {
-		fmt.Fprintln(os.Stderr, "usage:\n  arb refs <root> [--json] [--max-size bytes]\n  arb ui [root] [--listen addr] [--tailscale] [--refs scan.json]\n  arb whatif <root> --refs scan.json [--json]")
+		fmt.Fprintln(os.Stderr, "usage:\n  arb refs <root> [--json] [--ignore patterns] [--no-cache]\n  arb ui [root] [--listen addr] [--tailscale] [--refs scan.json]\n  arb whatif <root> --refs scan.json [--json]")
 		os.Exit(2)
 	}
 	fl := flag.NewFlagSet("refs", flag.ExitOnError)
 	asJSON := fl.Bool("json", false, "print every reference as JSON")
 	maxSize := fl.Int64("max-size", 1<<20, "skip text files larger than this many bytes")
+	ignore := fl.String("ignore", "", "comma-separated patterns to leave out, in addition to the workspace's .arboristignore")
+	noCache := fl.Bool("no-cache", false, "read every file again instead of reusing unchanged folders")
 	root, args := splitRoot(os.Args[2:])
 	fl.Parse(args)
 	if root == "" {
@@ -42,11 +46,27 @@ func main() {
 		os.Exit(2)
 	}
 
-	found, stats, err := refs.Scan(root, refs.Options{MaxFileSize: *maxSize, Progress: func(n int64) {
+	// Resolve the root the same way the web interface does, so both share one cache.
+	if abs, err := filepath.Abs(root); err == nil {
+		if real, err := filepath.EvalSymlinks(abs); err == nil {
+			root = real
+		}
+	}
+	opt := refs.Options{MaxFileSize: *maxSize, Ignore: refs.LoadIgnore(root)}
+	for _, p := range strings.Split(*ignore, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			opt.Ignore = append(opt.Ignore, p)
+		}
+	}
+	if dir, err := refs.CacheDir(root); err == nil && !*noCache {
+		opt.Cache = filepath.Join(dir, "scan.gob")
+	}
+	opt.Progress = func(n int64) {
 		if n%200000 == 0 {
 			fmt.Fprintf(os.Stderr, "%d files seen\n", n)
 		}
-	}})
+	}
+	found, stats, err := refs.Scan(root, opt)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "arb refs:", err)
 		os.Exit(1)
@@ -100,8 +120,8 @@ func summarize(found []refs.Ref, stats refs.Stats) {
 			}
 		}
 	}
-	fmt.Printf("files seen %d, text files scanned %d, skipped: %d large, %d binary, %d unreadable\n",
-		stats.Files, stats.Scanned, stats.SkippedBig, stats.SkippedBin, stats.Unreadable)
+	fmt.Printf("files seen %d: %d read, %d reused from the last scan; skipped: %d large, %d binary, %d unreadable; %d entries ignored\n",
+		stats.Files, stats.Scanned, stats.Reused, stats.SkippedBig, stats.SkippedBin, stats.Unreadable, stats.Ignored)
 	fmt.Printf("top-level projects containing references: %d\n\n", len(projects))
 
 	cats := make([]string, 0, len(byCat))

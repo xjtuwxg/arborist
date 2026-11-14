@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/xjtuwxg/arborist/internal/refs"
 )
 
 // Applying a plan only ever renames. Nothing is overwritten and nothing is
@@ -140,6 +142,7 @@ func (s *Server) buildPlan(rel string, selected []int, txid string) (*Plan, []Pr
 	}
 	plan := &Plan{Path: rel, Moves: []Move{}, Conflicts: []string{}}
 	var used []Proposal
+	ignore := refs.LoadIgnore(s.Root)
 	seenFrom, seenTo := map[string]bool{}, map[string]bool{}
 	editFiles := map[string]bool{}
 	conflict := func(format string, args ...any) {
@@ -205,6 +208,12 @@ func (s *Server) buildPlan(rel string, selected []int, txid string) (*Plan, []Pr
 				}
 				if !s.isScanned(from) {
 					plan.Unscanned = true
+				}
+				// References inside ignored folders were never looked at.
+				for _, pat := range ignore {
+					if a := refs.Anchored(pat); a != "" && (under(a, from) || under(from, a)) {
+						plan.Unscanned = true
+					}
 				}
 				plan.Breaks += m.Breaks
 				plan.Moves = append(plan.Moves, m)

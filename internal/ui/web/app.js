@@ -179,6 +179,11 @@ function renderActions() {
   $('#btn-analyze').title = state.provider ? 'Describe each entry and propose a reorganization' : 'No signed-in AI tool found';
   $('#btn-analyze').lastChild.textContent = a ? 'Analyze again' : 'Analyze';
   $('#btn-scan').lastChild.textContent = state.listing && state.listing.scanned ? 'Rescan references' : 'Scan references';
+  const ig = $('#btn-ignore');
+  ig.hidden = !state.path;
+  ig.textContent = state.listing && state.listing.ignored ? 'Include in scans' : 'Exclude from scans';
+  ig.title = 'Scans skip excluded folders. The list is the .arboristignore file in the workspace root.';
+  $('#btn-scan').disabled = !!(state.listing && state.listing.ignored);
   $('#btn-dry').disabled = !(a && a.proposals && a.proposals.length);
   $('#btn-dry').title = $('#btn-dry').disabled ? 'Analyze this folder first' : 'See the folder before and after, then decide';
 }
@@ -557,6 +562,15 @@ async function startJob(kind, body) {
 }
 
 $('#btn-scan').addEventListener('click', () => startJob('scan', { path: state.path }));
+$('#btn-ignore').addEventListener('click', async () => {
+  const ignore = !state.listing.ignored;
+  try {
+    const d = await api('/api/ignore', { path: state.path, ignore });
+    toast(d.ignored ? `${state.path} will be skipped by scans from now on.`
+      : ignore ? `${state.path} is excluded.` : `${state.path} will be scanned again.`);
+  } catch (err) { toast(err.message, { bad: true }); }
+  await reload();
+});
 $('#btn-analyze').addEventListener('click', () => {
   showTab('analysis');
   startJob('analyze', { path: state.path, provider: state.provider, model: $('#model').value.trim() });

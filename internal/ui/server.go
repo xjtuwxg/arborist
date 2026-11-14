@@ -8,7 +8,6 @@ package ui
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha1"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
@@ -53,6 +52,7 @@ type Server struct {
 	cacheDir string
 
 	applyMu sync.Mutex // one apply, undo or trash action at a time
+	scanMu  sync.Mutex // one scan at a time: scans share a cache file
 
 	mu        sync.Mutex
 	txs       []*Tx
@@ -108,14 +108,7 @@ func New(root string) (*Server, error) {
 }
 
 // cacheFor returns the cache directory of a workspace root.
-func cacheFor(root string) (string, error) {
-	cache, err := os.UserCacheDir()
-	if err != nil {
-		return "", err
-	}
-	sum := sha1.Sum([]byte(root))
-	return filepath.Join(cache, "arborist", hex.EncodeToString(sum[:6])), nil
-}
+func cacheFor(root string) (string, error) { return refs.CacheDir(root) }
 
 // LoadAnalyses returns the AI analyses stored for root, keyed by folder.
 func LoadAnalyses(root string) (map[string]*Analysis, error) {
@@ -194,6 +187,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/scan", s.handleScan)
 	mux.HandleFunc("POST /api/analyze", s.handleAnalyze)
 	mux.HandleFunc("POST /api/providers/refresh", s.handleRefresh)
+	mux.HandleFunc("POST /api/ignore", s.handleIgnore)
 	mux.HandleFunc("POST /api/plan", s.handlePlan)
 	mux.HandleFunc("POST /api/apply", s.handleApply)
 	mux.HandleFunc("GET /api/history", s.handleHistory)
@@ -344,7 +338,8 @@ func (s *Server) handleLs(w http.ResponseWriter, r *http.Request) {
 			entries[ti].RefsIn++
 		}
 	}
-	resp := map[string]any{"path": rel, "entries": entries, "scanned": s.isScanned(rel), "analysis": s.withImpact(rel)}
+	resp := map[string]any{"path": rel, "entries": entries, "scanned": s.isScanned(rel), "analysis": s.withImpact(rel),
+		"ignored": refs.IgnoredPath(refs.LoadIgnore(s.Root), rel)}
 	s.mu.Unlock()
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].Dir != entries[j].Dir {
@@ -468,7 +463,9 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j, err := s.start("scan", rel, func(j *Job) error {
-		found, stats, err := refs.Scan(s.Root, refs.Options{Sub: rel, Progress: func(n int64) {
+		s.scanMu.Lock()
+		defer s.scanMu.Unlock()
+		found, stats, err := refs.Scan(s.Root, refs.Options{Sub: rel, Ignore: refs.LoadIgnore(s.Root), Cache: filepath.Join(s.cacheDir, "scan.gob"), Progress: func(n int64) {
 			s.mu.Lock()
 			j.Detail = fmt.Sprintf("%d files so far", n)
 			s.mu.Unlock()
@@ -493,7 +490,10 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.scanned = roots
-		j.Detail = fmt.Sprintf("%d references in %d files scanned", len(found), stats.Scanned)
+		j.Detail = fmt.Sprintf("%d references; %d files read, %d unchanged and reused", len(found), stats.Scanned, stats.Reused)
+		if stats.Ignored > 0 {
+			j.Detail += fmt.Sprintf(", %d entries ignored", stats.Ignored)
+		}
 		s.mu.Unlock()
 		s.saveRefs()
 		return nil
@@ -503,4 +503,43 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, j)
+}
+
+// handleIgnore adds or removes a folder in the workspace's ignore list. It
+// is the one place Arborist writes a file of its own into the workspace.
+func (s *Server) handleIgnore(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path   string
+		Ignore bool
+	}
+	if err := readBody(r, &req); err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return
+	}
+	rel, _, err := s.resolve(req.Path)
+	if err != nil || rel == "" {
+		fail(w, http.StatusBadRequest, errors.New("choose a folder inside the workspace"))
+		return
+	}
+	s.applyMu.Lock()
+	defer s.applyMu.Unlock()
+	file := filepath.Join(s.Root, refs.IgnoreFile)
+	old, _ := os.ReadFile(file)
+	var lines []string
+	for _, line := range strings.Split(strings.TrimRight(string(old), "\n"), "\n") {
+		if refs.Anchored(strings.TrimSpace(line)) != rel && !(line == "" && len(old) == 0) {
+			lines = append(lines, line)
+		}
+	}
+	if req.Ignore {
+		if len(old) == 0 {
+			lines = append(lines, "# Folders Arborist leaves out of reference scans. One pattern per line.")
+		}
+		lines = append(lines, "/"+rel)
+	}
+	if err := os.WriteFile(file, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, map[string]any{"path": rel, "ignored": refs.IgnoredPath(refs.LoadIgnore(s.Root), rel)})
 }
