@@ -10,6 +10,7 @@ package providers
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -33,25 +34,37 @@ type Provider struct {
 	Note    string   `json:"note,omitempty"`
 	Models  []string `json:"models,omitempty"`  // suggestions; any model name the tool accepts may be used
 	Default string   `json:"default,omitempty"` // the tool's own configured model, when known
+	Login   string   `json:"login,omitempty"`   // what to run in a terminal to sign in again
+	Check   *Check   `json:"check,omitempty"`   // result of the last sign-in check, when one was made
+}
+
+// Check is the result of sending a one-word prompt through a tool. Ready only
+// says that a credential file exists; an expired login shows up here.
+type Check struct {
+	At     time.Time         `json:"at"`
+	OK     bool              `json:"ok"`               // at least one model answered
+	Models map[string]string `json:"models,omitempty"` // model choice ("" is the default) -> the model that answered, "" when the tool does not say
+	Failed map[string]string `json:"failed,omitempty"` // model choice -> why it did not answer
 }
 
 type spec struct {
 	id, name, bin, kind string
+	login               string
 	authFiles           []string // relative to home; existence means signed in
 	envKeys             []string
 	keychain            bool // macOS keeps the login in the keychain
 }
 
 var specs = []spec{
-	{id: "claude", name: "Claude Code", bin: "claude", kind: "subscription",
+	{id: "claude", name: "Claude Code", bin: "claude", kind: "subscription", login: "claude   (then type /login)",
 		authFiles: []string{".claude/.credentials.json"}, envKeys: []string{"ANTHROPIC_API_KEY"}, keychain: true},
-	{id: "codex", name: "Codex", bin: "codex", kind: "subscription",
+	{id: "codex", name: "Codex", bin: "codex", kind: "subscription", login: "codex login",
 		authFiles: []string{".codex/auth.json"}, envKeys: []string{"OPENAI_API_KEY"}},
-	{id: "gemini", name: "Gemini CLI", bin: "gemini", kind: "subscription",
+	{id: "gemini", name: "Gemini CLI", bin: "gemini", kind: "subscription", login: "gemini   (then type /auth)",
 		authFiles: []string{".gemini/oauth_creds.json"}, envKeys: []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}},
-	{id: "opencode", name: "opencode", bin: "opencode", kind: "subscription",
+	{id: "opencode", name: "opencode", bin: "opencode", kind: "subscription", login: "opencode auth login",
 		authFiles: []string{".local/share/opencode/auth.json"}},
-	{id: "ollama", name: "Ollama", bin: "ollama", kind: "local"},
+	{id: "ollama", name: "Ollama", bin: "ollama", kind: "local", login: "ollama serve   (and ollama pull <model>)"},
 }
 
 // extraDirs lists places CLIs get installed that a service's PATH often
@@ -115,7 +128,7 @@ func Detect(ctx context.Context) []Provider {
 		if path == "" {
 			continue
 		}
-		p := &Provider{ID: s.id, Name: s.name, Kind: s.kind, Path: path}
+		p := &Provider{ID: s.id, Name: s.name, Kind: s.kind, Path: path, Login: s.login}
 		found[i] = p
 		wg.Add(1)
 		go func(s spec) {
@@ -185,23 +198,84 @@ func Detect(ctx context.Context) []Provider {
 	return out
 }
 
-// Run sends prompt to the provider and returns its text answer. The tool is
+// Verify sends a one-word prompt through the tool, once per model choice it
+// offers, and reports which ones answered. For Claude Code that is the
+// default and each alias, which also tells us the model behind each alias.
+func Verify(ctx context.Context, p Provider) Check {
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	choices := []string{""}
+	if p.ID == "claude" {
+		choices = append(choices, p.Models...)
+	}
+	c := Check{Models: map[string]string{}, Failed: map[string]string{}}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, m := range choices {
+		wg.Add(1)
+		go func(m string) {
+			defer wg.Done()
+			_, used, err := Run(ctx, p, m, "Reply with the single word ok.")
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				c.Failed[m] = err.Error()
+				if ctx.Err() != nil {
+					c.Failed[m] = "did not answer within 90 seconds"
+				}
+				return
+			}
+			c.Models[m] = used
+		}(m)
+	}
+	wg.Wait()
+	c.At, c.OK = time.Now(), len(c.Models) > 0
+	return c
+}
+
+// claudeAnswer reads Claude Code's JSON result: the text, and the model that
+// produced most of the output.
+func claudeAnswer(out []byte) (text, model string, err error) {
+	var doc struct {
+		Result     string `json:"result"`
+		IsError    bool   `json:"is_error"`
+		ModelUsage map[string]struct {
+			OutputTokens int64 `json:"outputTokens"`
+		} `json:"modelUsage"`
+	}
+	if jerr := json.Unmarshal(out, &doc); jerr != nil {
+		return "", "", fmt.Errorf("could not read Claude Code's output: %v", jerr)
+	}
+	best := int64(-1)
+	for name, u := range doc.ModelUsage {
+		if u.OutputTokens > best {
+			best, model = u.OutputTokens, name
+		}
+	}
+	if doc.IsError {
+		return "", model, errors.New(doc.Result)
+	}
+	return doc.Result, model, nil
+}
+
+// Run sends prompt to the provider and returns its text answer and, when the
+// tool reports it, the model that answered. The tool is
 // started in an empty directory with its own tools switched off or read-only:
 // the prompt contains file names and README text from the workspace, which is
 // untrusted, so the model must not be able to act on it.
 //
 // model may be empty, meaning the tool's own default.
-func Run(ctx context.Context, p Provider, model, prompt string) (string, error) {
+func Run(ctx context.Context, p Provider, model, prompt string) (string, string, error) {
 	cache, err := os.UserCacheDir()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	sandbox := filepath.Join(cache, "arborist", "sandbox")
 	if err := os.MkdirAll(sandbox, 0o700); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if strings.HasPrefix(model, "-") {
-		return "", fmt.Errorf("invalid model name %q", model)
+		return "", "", fmt.Errorf("invalid model name %q", model)
 	}
 	// with adds the model flag when a model was chosen.
 	with := func(flag string) []string {
@@ -215,12 +289,12 @@ func Run(ctx context.Context, p Provider, model, prompt string) (string, error) 
 	var lastMsg string
 	switch p.ID {
 	case "claude":
-		args = []string{"-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--output-format", "text"}
+		args = []string{"-p", "--tools", "", "--strict-mcp-config", "--no-session-persistence", "--output-format", "json"}
 		args = append(args, with("--model")...)
 	case "codex":
 		f, err := os.CreateTemp(sandbox, "codex-*.txt")
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		f.Close()
 		lastMsg = f.Name()
@@ -233,14 +307,14 @@ func Run(ctx context.Context, p Provider, model, prompt string) (string, error) 
 		args, stdin = append(append([]string{"run"}, with("-m")...), prompt), ""
 	case "ollama":
 		if len(p.Models) == 0 {
-			return "", errors.New("ollama has no models")
+			return "", "", errors.New("ollama has no models")
 		}
 		if model == "" {
 			model = p.Models[0]
 		}
 		args = []string{"run", model}
 	default:
-		return "", fmt.Errorf("unknown provider %q", p.ID)
+		return "", "", fmt.Errorf("unknown provider %q", p.ID)
 	}
 	cmd := exec.CommandContext(ctx, p.Path, args...)
 	cmd.Dir = sandbox
@@ -250,20 +324,28 @@ func Run(ctx context.Context, p Provider, model, prompt string) (string, error) 
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
+		if p.ID == "claude" { // a failed run still prints its JSON result, which carries the reason
+			if _, _, cerr := claudeAnswer(stdout.Bytes()); cerr != nil && !strings.HasPrefix(cerr.Error(), "could not read") {
+				msg = cerr.Error()
+			}
+		}
 		if msg == "" {
 			msg = strings.TrimSpace(stdout.String())
 		}
 		if len(msg) > 600 {
 			msg = msg[len(msg)-600:]
 		}
-		return "", fmt.Errorf("%s failed: %v: %s", p.Name, err, msg)
+		return "", "", fmt.Errorf("%s failed: %v: %s", p.Name, err, msg)
 	}
 	if lastMsg != "" {
 		b, err := os.ReadFile(lastMsg)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
-		return string(b), nil
+		return string(b), model, nil
 	}
-	return stdout.String(), nil
+	if p.ID == "claude" {
+		return claudeAnswer(stdout.Bytes())
+	}
+	return stdout.String(), model, nil
 }

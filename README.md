@@ -60,7 +60,10 @@ stays the same across restarts. Per folder you can:
 disk is slow, because every text file is read. Later scans reuse what was
 found in any folder whose files have the same names, sizes and modification
 times, and open only files in folders that changed. The command line and the
-web interface share the cache (`--no-cache` rereads everything).
+web interface share the cache (`--no-cache` rereads everything). Even an
+unchanged workspace still has every file's metadata looked at, which takes
+minutes on millions of files; the scan shows how far it is against the number
+of files the previous scan saw, with an estimate of the time left.
 
 **Leaving folders out.** Lines in `.arboristignore` in the workspace root name
 folders and files that scans skip: `/data/trees` is a path from the root,
@@ -80,8 +83,13 @@ works from any device on the tailnet, no SSH tunnel needed.
 are already installed and signed in (Claude Code, Codex, Gemini CLI, opencode,
 Ollama) and uses one of them; there are no API keys to enter. The sidebar
 lets you pick the provider and the model (suggestions come from the tool where
-it can list them; any model name the tool accepts can be typed). It only checks
-that a tool's credential file exists and never reads it. The tool is run in an
+it can list them; "Other…" takes any model name the tool accepts). Detection
+only checks that a tool's credential file exists and never reads it. Because
+a credential file can outlive the login, Arborist also sends each tool a
+one-word prompt, at most once a day or when you press *Check sign-ins*; tools
+and models that do not answer are greyed out with the reason and the command
+that signs in again. For Claude Code the same check shows which model each
+alias (`opus`, `sonnet`, `haiku`) currently means. The tool is run in an
 empty directory with its own tools disabled or read-only, because folder names
 and README text are untrusted input. Analysis sends folder names and the first
 lines of README files to the chosen tool.

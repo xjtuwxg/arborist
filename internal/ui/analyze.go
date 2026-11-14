@@ -215,7 +215,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), analyzeBudget)
 		defer cancel()
-		answer, err := providers.Run(ctx, *prov, req.Model, fmt.Sprintf(promptHead, time.Now().Format("2006-01-02"), shown)+facts)
+		answer, used, err := providers.Run(ctx, *prov, req.Model, fmt.Sprintf(promptHead, time.Now().Format("2006-01-02"), shown)+facts)
 		if err != nil {
 			return err
 		}
@@ -224,8 +224,11 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		label := prov.Name
-		if req.Model != "" {
-			label += " (" + req.Model + ")"
+		if used == "" {
+			used = req.Model
+		}
+		if used != "" {
+			label += " (" + used + ")"
 		}
 		a := &Analysis{Provider: label, At: time.Now()}
 		if err := json.Unmarshal([]byte(raw), a); err != nil {
@@ -259,7 +262,7 @@ func (s *Server) handleAnalyze(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		s.saveJSON("analyses.json", snapshot)
-		j.Detail = fmt.Sprintf("%d items, %d proposals, via %s", len(a.Items), len(a.Proposals), prov.Name)
+		j.Detail = fmt.Sprintf("%d items, %d proposals, via %s", len(a.Items), len(a.Proposals), label)
 		return nil
 	})
 	if err != nil {

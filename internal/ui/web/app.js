@@ -90,16 +90,27 @@ const modelKey = () => 'arborist.model.' + state.provider;
 const OTHER = '\u0000other';
 const modelValue = () => ($('#model').value === OTHER ? $('#model-custom').value.trim() : $('#model').value);
 
+// usable: signed in as far as we can tell. A failed sign-in check overrides
+// the presence of a credential file.
+const usable = (p) => p.ready && !(p.check && !p.check.ok);
+// reasonOf picks the line of a tool's error output that says what went wrong;
+// the rest is usually warnings.
+function reasonOf(s) {
+  const lines = String(s || '').split('\n').map((l) => l.trim()).filter((l) => l && !/^at /.test(l));
+  const hit = lines.filter((l) => /error|expired|authenticat|unauthori|not supported|no longer supported|unsupported|log ?in|sign ?in|quota|limit|did not answer/i.test(l)).pop() || lines.pop() || '';
+  return hit.length > 140 ? hit.slice(0, 140) + '…' : hit;
+}
+
 function pickProvider() {
-  const ready = state.providers.filter((p) => p.ready);
+  const ready = state.providers.filter(usable);
   const saved = store.get('arborist.provider');
   state.provider = (ready.find((p) => p.id === saved) || ready[0] || {}).id || null;
 }
 
 function renderAI() {
   const sel = $('#provider');
-  fill(sel, state.providers.map((p) => h('option', { value: p.id, disabled: !p.ready, selected: p.id === state.provider },
-    p.name + (p.ready ? '' : ' (not signed in)'))));
+  fill(sel, state.providers.map((p) => h('option', { value: p.id, disabled: !usable(p), selected: p.id === state.provider },
+    p.name + (usable(p) ? '' : p.ready ? ' (not answering)' : ' (not signed in)'))));
   if (!state.providers.length) fill(sel, h('option', { value: '' }, 'None found'));
   sel.disabled = !state.provider;
   const p = current();
@@ -108,21 +119,35 @@ function renderAI() {
   const listed = (p && p.models) || [];
   const other = saved !== '' && !listed.includes(saved);
   model.disabled = !p;
+  const chk = (p && p.check) || {};
+  const answered = chk.models || {};
+  const failed = chk.failed || {};
+  const def = answered[''] || (p && p.default);
   fill(model, [
-    h('option', { value: '', selected: saved === '' }, p && p.default ? `Default (${p.default})` : 'Default'),
-    ...listed.map((m) => h('option', { value: m, selected: m === saved }, m)),
+    h('option', { value: '', selected: saved === '' }, def ? `Default (${def})` : 'Default'),
+    ...listed.map((m) => h('option', { value: m, selected: m === saved, disabled: m in failed, title: m in failed ? reasonOf(failed[m]) : '' },
+      m + (answered[m] ? ` · ${answered[m]}` : m in failed ? ' (unavailable)' : ''))),
     h('option', { value: OTHER, selected: other }, 'Other…'),
   ]);
   $('#model-other').hidden = !other;
   $('#model-custom').value = other ? saved : '';
-  let hint = 'No AI tool found. Browsing and reference scans still work.';
+  const lines = [];
   if (p) {
-    hint = `Using your ${p.name} sign-in on this machine` + (p.version ? ` (${p.version.replace(/\s*\(.*\)/, '')})` : '') +
-      '.';
+    const when = p.check && p.check.ok ? `, checked ${ago(p.check.at)}` : state.checking ? ', checking the sign-in…' : ', sign-in not checked';
+    lines.push(h('div', {}, `Using your ${p.name} sign-in on this machine` + (p.version ? ` (${p.version.replace(/\s*\(.*\)/, '')})` : '') + when + '.'));
   } else if (state.providers.length) {
-    hint = 'AI tools are installed but none is signed in. Sign in from a terminal, then look again.';
+    lines.push(h('div', {}, 'AI tools are installed but none is signed in.'));
+  } else {
+    lines.push(h('div', {}, 'No AI tool found. Browsing and reference scans still work.'));
   }
-  $('#ai-hint').textContent = hint;
+  for (const q of state.providers.filter((q) => !usable(q))) {
+    const why = q.ready ? reasonOf(Object.values(q.check.failed || {})[0]) : q.note;
+    lines.push(h('div', { class: 'bad' }, `${q.name} is ${q.ready ? 'not answering' : 'not signed in'}.`,
+      why ? h('span', { class: 'why' }, ' ' + why) : null,
+      ...(q.login && (!q.ready || /authenticat|unauthori|expired|credential|log ?in|sign ?in/i.test(why))
+        ? [h('span', {}, ' To sign in again, run in a terminal here:'), h('code', {}, q.login)] : [])));
+  }
+  fill($('#ai-hint'), lines);
   renderActions();
 }
 
@@ -138,17 +163,40 @@ $('#model').addEventListener('change', (ev) => {
   store.set(modelKey(), modelValue());
 });
 $('#model-custom').addEventListener('change', () => store.set(modelKey(), modelValue()));
-$('#btn-rescan-ai').addEventListener('click', async () => {
-  state.providers = await api('/api/providers/refresh', {});
-  pickProvider();
+$('#btn-rescan-ai').addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  btn.textContent = 'Checking sign-ins…';
+  try {
+    state.providers = await api('/api/providers/check', {});
+    const keep = current();
+    if (!keep || !usable(keep)) pickProvider();
+    const bad = state.providers.filter((p) => p.ready && !usable(p));
+    toast(`${plural(state.providers.filter(usable).length, 'AI tool')} signed in and answering.` + (bad.length ? ` Not answering: ${bad.map((p) => p.name).join(', ')}.` : ''), { bad: bad.length > 0 });
+  } catch (err) { toast(err.message, { bad: true }); }
+  btn.disabled = false;
+  btn.textContent = 'Check sign-ins';
   renderAI();
-  toast(`Found ${plural(state.providers.filter((p) => p.ready).length, 'signed-in AI tool')}.`);
 });
+
+// The server checks sign-ins in the background when it starts; pick the result up.
+async function awaitChecks() {
+  while (state.checking) {
+    await new Promise((r) => setTimeout(r, 3000));
+    let s;
+    try { s = await api('/api/state'); } catch { return; }
+    state.providers = s.providers || [];
+    state.checking = !!s.checking;
+    const keep = current();
+    if (!keep || !usable(keep)) pickProvider();
+    renderAI();
+  }
+}
 
 function renderWelcome() {
   const box = $('#welcome');
   if (store.get('arborist.welcomed')) return;
-  const ready = state.providers.filter((p) => p.ready);
+  const ready = state.providers.filter(usable);
   if (!ready.length) return;
   fill(box, h('p', {}, `Found ${plural(ready.length, 'AI tool')} already signed in on this machine: ` +
     ready.map((p) => p.name).join(', ') + `. Arborist will use ${current().name}; change the provider or model in the sidebar. ` +
@@ -534,6 +582,9 @@ async function loadTrash() {
 
 // ---- jobs -----------------------------------------------------------------
 
+const count = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : String(n));
+const span = (s) => (s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`);
+const ago = (t) => { const s = (Date.now() - new Date(t)) / 1000; return s < 90 ? 'just now' : span(s) + ' ago'; };
 let pollTimer = null;
 const finished = new Set();
 let primed = false;
@@ -547,17 +598,30 @@ async function pollJobs() {
   for (const j of jobs.slice(-3).reverse()) {
     const where = j.path || rootName();
     let text;
+    let bar = null;
     if (j.status === 'running') {
       running = true;
       const secs = Math.round((Date.now() - new Date(j.started)) / 1000);
-      text = `${j.kind === 'scan' ? 'Scanning' : 'Analyzing'} ${where}… ${secs}s` + (j.detail ? ` · ${j.detail}` : '');
+      text = `${j.kind === 'scan' ? 'Scanning' : 'Analyzing'} ${where}… ${span(secs)}`;
+      if (j.kind === 'scan' && j.total > 0) {
+        // The total is what the last scan saw, so it is an estimate; never show 100% while running.
+        const frac = Math.min(0.99, (j.seen || 0) / j.total);
+        const left = frac > 0.02 ? ` · about ${span(secs * (1 - frac) / frac)} left` : '';
+        text += ` · ${count(j.seen || 0)} of about ${count(j.total)} files · ${Math.floor(frac * 100)}%${left}`;
+        bar = h('progress', { max: 1, value: frac });
+      } else if (j.kind === 'scan') {
+        text += ` · ${count(j.seen || 0)} files so far. First scan of this folder, so the total is not known yet.`;
+        bar = h('progress', {});
+      } else if (j.detail) {
+        text += ` · ${j.detail}`;
+      }
     } else if (j.status === 'failed') {
       text = `${j.kind === 'scan' ? 'Scan' : 'Analysis'} of ${where} failed: ${j.error}`;
     } else {
       text = `${j.kind === 'scan' ? 'Scan' : 'Analysis'} of ${where}: ${j.detail}`;
     }
     if (j.status !== 'running' && !finished.has(j.id)) { finished.add(j.id); changed = true; }
-    nodes.push(h('span', { class: 'job ' + j.status }, text));
+    nodes.push(h('span', { class: 'job ' + j.status }, bar, text));
   }
   fill($('#jobs'), nodes);
   if (changed && primed) await reload();
@@ -600,6 +664,8 @@ window.addEventListener('popstate', () => { if (fromHash() !== state.path) go(fr
   const s = await api('/api/state');
   state.root = s.root;
   state.providers = s.providers || [];
+  state.checking = !!s.checking;
+  awaitChecks();
   fill($('#machine'), s.host, h('br'), s.root);
   document.title = `Arborist · ${s.host}`;
   pickProvider();

@@ -40,6 +40,8 @@ type Job struct {
 	Status  string    `json:"status"` // "running", "done", "failed"
 	Error   string    `json:"error,omitempty"`
 	Detail  string    `json:"detail,omitempty"`
+	Seen    int64     `json:"seen,omitempty"`  // scan: files looked at so far
+	Total   int64     `json:"total,omitempty"` // scan: files the last scan saw here; 0 when unknown
 	Started time.Time `json:"started"`
 	Ended   time.Time `json:"ended,omitzero"`
 }
@@ -60,6 +62,8 @@ type Server struct {
 	scanned   []string // subfolders (relative, "" for the root) with reference data
 	analyses  map[string]*Analysis
 	providers []providers.Provider
+	checks    map[string]*providers.Check // by provider id; survives restarts
+	checking  bool
 	jobs      []*Job
 }
 
@@ -104,8 +108,78 @@ func New(root string) (*Server, error) {
 	refs.Recategorize(s.refs)
 	s.loadJSON("analyses.json", &s.analyses)
 	s.loadJournal()
-	s.providers = providers.Detect(context.Background())
+	s.checks = map[string]*providers.Check{}
+	s.loadJSON("checks.json", &s.checks)
+	s.setProviders(providers.Detect(context.Background()))
 	return s, nil
+}
+
+// setProviders stores a fresh detection, keeping the sign-in checks.
+func (s *Server) setProviders(found []providers.Provider) []providers.Provider {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range found {
+		found[i].Check = s.checks[found[i].ID]
+	}
+	s.providers = found
+	return append([]providers.Provider{}, found...)
+}
+
+// CheckSignIns starts the sign-in check in the background.
+func (s *Server) CheckSignIns() { go s.verify(false) }
+
+// verify sends a one-word prompt through every tool that looks signed in.
+// Unless all is set, tools checked within the last day are left alone, so a
+// restart does not spend anything.
+func (s *Server) verify(all bool) {
+	s.mu.Lock()
+	if s.checking {
+		s.mu.Unlock()
+		return
+	}
+	s.checking = true
+	var todo []providers.Provider
+	for _, p := range s.providers {
+		if c := s.checks[p.ID]; p.Ready && (all || c == nil || time.Since(c.At) > 24*time.Hour) {
+			todo = append(todo, p)
+		}
+	}
+	s.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, p := range todo {
+		wg.Add(1)
+		go func(p providers.Provider) {
+			defer wg.Done()
+			c := providers.Verify(context.Background(), p)
+			s.mu.Lock()
+			s.checks[p.ID] = &c
+			for i := range s.providers {
+				if s.providers[i].ID == p.ID {
+					s.providers[i].Check = &c
+				}
+			}
+			s.mu.Unlock()
+		}(p)
+	}
+	wg.Wait()
+	s.mu.Lock()
+	s.checking = false
+	snapshot := make(map[string]*providers.Check, len(s.checks))
+	for k, v := range s.checks {
+		snapshot[k] = v
+	}
+	s.mu.Unlock()
+	if len(todo) > 0 {
+		s.saveJSON("checks.json", snapshot)
+	}
+}
+
+func (s *Server) handleCheck(w http.ResponseWriter, r *http.Request) {
+	s.setProviders(providers.Detect(r.Context()))
+	s.verify(true)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	writeJSON(w, s.providers)
 }
 
 // cacheFor returns the cache directory of a workspace root.
@@ -188,6 +262,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
 	mux.HandleFunc("POST /api/scan", s.handleScan)
 	mux.HandleFunc("POST /api/analyze", s.handleAnalyze)
+	mux.HandleFunc("POST /api/providers/check", s.handleCheck)
 	mux.HandleFunc("POST /api/providers/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/ignore", s.handleIgnore)
 	mux.HandleFunc("POST /api/plan", s.handlePlan)
@@ -271,15 +346,11 @@ func (s *Server) handleState(w http.ResponseWriter, r *http.Request) {
 	host, _ := os.Hostname()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	writeJSON(w, map[string]any{"root": s.Root, "host": host, "providers": s.providers, "refs": len(s.refs), "scanned": s.scanned, "trash": len(s.trashItems())})
+	writeJSON(w, map[string]any{"root": s.Root, "host": host, "providers": s.providers, "checking": s.checking, "refs": len(s.refs), "scanned": s.scanned, "trash": len(s.trashItems())})
 }
 
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	found := providers.Detect(r.Context())
-	s.mu.Lock()
-	s.providers = found
-	s.mu.Unlock()
-	writeJSON(w, found)
+	writeJSON(w, s.setProviders(providers.Detect(r.Context())))
 }
 
 type entry struct {
@@ -467,9 +538,9 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	j, err := s.start("scan", rel, func(j *Job) error {
 		s.scanMu.Lock()
 		defer s.scanMu.Unlock()
-		found, stats, err := refs.Scan(s.Root, refs.Options{Sub: rel, Ignore: refs.LoadIgnore(s.Root), Cache: filepath.Join(s.cacheDir, "scan.gob"), Progress: func(n int64) {
+		found, stats, err := refs.Scan(s.Root, refs.Options{Sub: rel, Ignore: refs.LoadIgnore(s.Root), Cache: filepath.Join(s.cacheDir, "scan.gob"), Progress: func(n, total int64) {
 			s.mu.Lock()
-			j.Detail = fmt.Sprintf("%d files so far", n)
+			j.Seen, j.Total = n, total
 			s.mu.Unlock()
 		}})
 		if err != nil {

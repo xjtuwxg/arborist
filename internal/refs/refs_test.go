@@ -87,7 +87,13 @@ func TestCacheAndIgnore(t *testing.T) {
 		t.Fatalf("first scan: %d refs, stats %+v", len(first), st)
 	}
 
-	second, st, _ := Scan(root, opt)
+	var expected int64 = -1
+	withTotal := opt
+	withTotal.Progress = func(_, total int64) { expected = total }
+	second, st, _ := Scan(root, withTotal)
+	if expected != 3 {
+		t.Fatalf("second scan should expect the 3 files the first one saw, got %d", expected)
+	}
 	if st.Scanned != 0 || st.Reused != 3 || len(second) != 2 {
 		t.Fatalf("second scan should read nothing: %d refs, stats %+v", len(second), st)
 	}

@@ -83,9 +83,13 @@ func main() {
 	if dir, err := refs.CacheDir(root); err == nil && !*noCache {
 		opt.Cache = filepath.Join(dir, "scan.gob")
 	}
-	opt.Progress = func(n int64) {
-		if n%200000 == 0 {
-			fmt.Fprintf(os.Stderr, "%d files seen\n", n)
+	opt.Progress = func(n, total int64) {
+		if n%200000 == 0 && n > 0 {
+			if total > 0 {
+				fmt.Fprintf(os.Stderr, "%d of about %d files seen (%d%%)\n", n, total, min(99, n*100/total))
+			} else {
+				fmt.Fprintf(os.Stderr, "%d files seen\n", n)
+			}
 		}
 	}
 	found, stats, err := refs.Scan(root, opt)

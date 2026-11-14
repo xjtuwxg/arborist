@@ -64,7 +64,11 @@ button.small { padding: 3px 9px; font-size: 12.5px; border-radius: 6px; }
 .field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--side-muted); }
 .field select, .field input { background: var(--side-hover); border: 1px solid var(--side-line); color: #fff; border-radius: 7px; padding: 6px 8px; width: 100%; font-size: 13px; }
 .field input::placeholder { color: var(--side-muted); }
-.ai .hint { font-size: 11.5px; color: var(--side-muted); line-height: 1.4; }
+.ai .hint { font-size: 11.5px; color: var(--side-muted); line-height: 1.4; display: flex; flex-direction: column; gap: 6px; }
+.ai .hint .bad { color: #f3b0a8; }
+.ai .hint .why { opacity: .8; }
+.ai .hint code { display: block; margin-top: 3px; padding: 3px 6px; border-radius: 5px; background: var(--side-hover); color: #fff; font-size: 11.5px; user-select: all; white-space: pre-wrap; }
+.field select option:disabled { color: #7b8496; }
 .ai button.ghost { color: var(--side-muted); font-size: 12px; padding: 4px 0; }
 
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -192,6 +196,8 @@ pre.preview { margin: 0; font: 12px/1.55 var(--mono); white-space: pre-wrap; ove
 .job.running::before { content: ""; display: inline-block; width: 9px; height: 9px; margin-right: 7px; border: 2px solid var(--accent); border-right-color: transparent;
   border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; }
 .job.failed { color: var(--red); }
+.job progress { width: 180px; height: 6px; margin-right: 9px; vertical-align: 1px; accent-color: var(--accent); }
+.job.running:has(progress)::before { display: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .toasts { position: fixed; right: 18px; bottom: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 20; }
 .toast { background: var(--side); color: #fff; border-radius: 10px; padding: 10px 14px; box-shadow: var(--shadow-lg); display: flex; gap: 12px; align-items: center; max-width: 460px; animation: rise .18s ease-out; }

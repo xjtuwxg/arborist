@@ -36,12 +36,12 @@ type Ref struct {
 
 // Options controls a scan.
 type Options struct {
-	MaxFileSize int64             // text files larger than this are skipped
-	Sub         string            // only walk this subfolder of root (references are still relative to root)
-	Workers     int               // files read in parallel
-	Ignore      []string          // patterns of folders and files to leave out, see Ignored
-	Cache       string            // file that remembers earlier scans; empty means scan everything
-	Progress    func(files int64) // called now and then with the number of files seen so far
+	MaxFileSize int64                       // text files larger than this are skipped
+	Sub         string                      // only walk this subfolder of root (references are still relative to root)
+	Workers     int                         // files read in parallel
+	Ignore      []string                    // patterns of folders and files to leave out, see Ignored
+	Cache       string                      // file that remembers earlier scans; empty means scan everything
+	Progress    func(files, expected int64) // called now and then with the files seen so far and the number the last scan saw (0 when unknown)
 }
 
 // Stats counts what the scan looked at.
@@ -135,6 +135,7 @@ type cachedRef struct {
 type cachedDir struct {
 	Fp   uint64
 	Refs []cachedRef
+	N    int32 // files and symlinks directly in the folder; lets the next scan say how far along it is
 }
 
 type scanCache struct {
@@ -142,24 +143,25 @@ type scanCache struct {
 	Root        string
 	MaxFileSize int64
 	Dirs        map[string]*cachedDir // keyed by folder path relative to the root
+	Counted     bool                  // every folder has its N (caches written by older versions do not)
 }
 
 const cacheVersion = 1
 
-func loadCache(file, root string, max int64) map[string]*cachedDir {
+func loadCache(file, root string, max int64) (map[string]*cachedDir, bool) {
 	f, err := os.Open(file)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer f.Close()
 	var c scanCache
 	if gob.NewDecoder(bufio.NewReader(f)).Decode(&c) != nil || c.Version != cacheVersion || c.Root != root || c.MaxFileSize != max {
-		return nil
+		return nil, false
 	}
-	return c.Dirs
+	return c.Dirs, c.Counted
 }
 
-func saveCache(file, root string, max int64, dirs map[string]*cachedDir) error {
+func saveCache(file, root string, max int64, dirs map[string]*cachedDir, counted bool) error {
 	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
 		return err
 	}
@@ -169,7 +171,7 @@ func saveCache(file, root string, max int64, dirs map[string]*cachedDir) error {
 		return err
 	}
 	w := bufio.NewWriter(f)
-	err = gob.NewEncoder(w).Encode(scanCache{Version: cacheVersion, Root: root, MaxFileSize: max, Dirs: dirs})
+	err = gob.NewEncoder(w).Encode(scanCache{Version: cacheVersion, Root: root, MaxFileSize: max, Dirs: dirs, Counted: counted})
 	if err == nil {
 		err = w.Flush()
 	}
@@ -206,8 +208,17 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 	needle := []byte(root + "/")
 
 	var old map[string]*cachedDir
+	var counted bool
+	var expect int64 // files the last scan saw here; 0 when unknown
 	if opt.Cache != "" {
-		old = loadCache(opt.Cache, root, opt.MaxFileSize)
+		old, counted = loadCache(opt.Cache, root, opt.MaxFileSize)
+		if counted {
+			for dir, c := range old {
+				if underDir(dir, sub) {
+					expect += int64(c.N)
+				}
+			}
+		}
 	}
 	fresh := map[string]*cachedDir{} // every folder visited by this scan
 	rescanned := map[string]bool{}   // of those, the ones whose files were read
@@ -271,6 +282,7 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 		}
 		var files []file
 		var subdirs []string
+		var here int32
 		fp := fnv.New64a()
 		var num [16]byte
 		for _, d := range des {
@@ -307,8 +319,9 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 				continue
 			}
 			seen++
+			here++
 			if opt.Progress != nil && seen%20000 == 0 {
-				opt.Progress(seen)
+				opt.Progress(seen, expect)
 			}
 		}
 		sum := fp.Sum64()
@@ -332,9 +345,13 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 				}
 			}
 		}
+		fresh[rel].N = here
 		for _, d := range subdirs {
 			walk(d)
 		}
+	}
+	if opt.Progress != nil {
+		opt.Progress(0, expect)
 	}
 	walk(sub)
 	close(jobs)
@@ -358,7 +375,7 @@ func Scan(root string, opt Options) ([]Ref, Stats, error) {
 				fresh[dir] = c
 			}
 		}
-		if err := saveCache(opt.Cache, root, opt.MaxFileSize, fresh); err != nil {
+		if err := saveCache(opt.Cache, root, opt.MaxFileSize, fresh, counted || sub == "" || old == nil); err != nil {
 			return out, stats, err
 		}
 	}

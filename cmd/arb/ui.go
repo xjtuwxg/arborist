@@ -40,6 +40,7 @@ func runUI(args []string) {
 		fmt.Fprintln(os.Stderr, "arb ui:", err)
 		os.Exit(1)
 	}
+	srv.CheckSignIns()
 	if *refsFile != "" {
 		if err := srv.LoadRefs(*refsFile); err != nil {
 			fmt.Fprintln(os.Stderr, "arb ui:", err)
