@@ -468,7 +468,11 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	j, err := s.start("scan", rel, func(j *Job) error {
-		found, stats, err := refs.Scan(s.Root, refs.Options{Sub: rel})
+		found, stats, err := refs.Scan(s.Root, refs.Options{Sub: rel, Progress: func(n int64) {
+			s.mu.Lock()
+			j.Detail = fmt.Sprintf("%d files so far", n)
+			s.mu.Unlock()
+		}})
 		if err != nil {
 			return err
 		}

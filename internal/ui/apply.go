@@ -51,8 +51,10 @@ type Plan struct {
 	Conflicts []string `json:"conflicts"`
 	Before    []*Node  `json:"before"`
 	After     []*Node  `json:"after"`
-	Breaks    int      `json:"breaks"`
-	Unscanned bool     `json:"unscanned"`
+	Breaks    int      `json:"breaks"`    // live references pointing at the moved entries
+	Repairs   int      `json:"repairs"`   // of those, how many a repair rewrites
+	Files     int      `json:"files"`     // files a repair edits
+	Unscanned bool     `json:"unscanned"` // some entries have no reference scan
 }
 
 // Tx is a journal entry: one applied plan.
@@ -63,7 +65,9 @@ type Tx struct {
 	Moves     []Move     `json:"moves"`
 	Created   []string   `json:"created"` // folders made for the moves
 	Proposals []Proposal `json:"proposals"`
-	Status    string     `json:"status"` // applying, applied, undone, failed
+	Edits     []Edit     `json:"edits"`              // files rewritten by the reference repair
+	Problems  []string   `json:"problems,omitempty"` // references that could not be repaired
+	Status    string     `json:"status"`             // applying, applied, undone, failed
 	Error     string     `json:"error,omitempty"`
 }
 
@@ -137,6 +141,7 @@ func (s *Server) buildPlan(rel string, selected []int, txid string) (*Plan, []Pr
 	plan := &Plan{Path: rel, Moves: []Move{}, Conflicts: []string{}}
 	var used []Proposal
 	seenFrom, seenTo := map[string]bool{}, map[string]bool{}
+	editFiles := map[string]bool{}
 	conflict := func(format string, args ...any) {
 		plan.Conflicts = append(plan.Conflicts, fmt.Sprintf(format, args...))
 	}
@@ -192,6 +197,10 @@ func (s *Server) buildPlan(rel string, selected []int, txid string) (*Plan, []Pr
 				for _, ref := range s.refs {
 					if !ref.Dangling && under(ref.Target, from) {
 						m.Breaks++
+						if repairable(ref) {
+							plan.Repairs++
+							editFiles[ref.File] = true
+						}
 					}
 				}
 				if !s.isScanned(from) {
@@ -209,6 +218,7 @@ func (s *Server) buildPlan(rel string, selected []int, txid string) (*Plan, []Pr
 			}
 		}
 	}
+	plan.Files = len(editFiles)
 	s.trees(plan)
 	return plan, used, nil
 }
@@ -357,7 +367,7 @@ func (s *Server) remapRefs(pairs [][2]string) {
 	}
 }
 
-func (s *Server) apply(rel string, selected []int) (*Tx, error) {
+func (s *Server) apply(rel string, selected []int, repair bool) (*Tx, error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	id := time.Now().Format("20060102-150405")
@@ -373,7 +383,7 @@ func (s *Server) apply(rel string, selected []int) (*Tx, error) {
 	if len(plan.Moves) == 0 {
 		return nil, errors.New("nothing to move")
 	}
-	tx := &Tx{ID: id, At: time.Now(), Path: rel, Moves: plan.Moves, Created: []string{}, Proposals: used, Status: "applying"}
+	tx := &Tx{ID: id, At: time.Now(), Path: rel, Moves: plan.Moves, Created: []string{}, Proposals: used, Edits: []Edit{}, Status: "applying"}
 	if err := s.saveTx(tx); err != nil {
 		return nil, fmt.Errorf("could not write the journal, so nothing was moved: %w", err)
 	}
@@ -396,6 +406,9 @@ func (s *Server) apply(rel string, selected []int) (*Tx, error) {
 		}
 		m.Done = true
 		s.saveTx(tx)
+	}
+	if repair {
+		tx.Problems = s.repair(tx)
 	}
 	tx.Status = "applied"
 	s.saveTx(tx)
@@ -459,7 +472,11 @@ func (s *Server) undo(id string) (*Tx, error) {
 	if tx == nil || tx.ID != id {
 		return nil, errors.New("only the most recent change can be undone")
 	}
+	// Files were edited at their new paths, so put them back before the moves.
 	var skipped []string
+	for _, f := range s.unrepair(tx) {
+		skipped = append(skipped, "reference repair kept in "+f)
+	}
 	var pairs [][2]string
 	for i := len(tx.Moves) - 1; i >= 0; i-- {
 		m := &tx.Moves[i]
@@ -481,10 +498,18 @@ func (s *Server) undo(id string) (*Tx, error) {
 	s.removeHolders(path.Join(trashName, tx.ID, tx.Path, "x"))
 	tx.Status = "undone"
 	if len(skipped) > 0 {
-		tx.Error = "not put back: " + strings.Join(skipped, "; ")
+		tx.Error = "not fully undone: " + strings.Join(skipped, "; ")
 	}
 	s.saveTx(tx)
 	s.mu.Lock()
+	for i := range s.refs {
+		for _, p := range pairs {
+			if under(s.refs[i].Target, p[0]) {
+				s.refs[i].Target = p[1] + strings.TrimPrefix(s.refs[i].Target, p[0])
+				break
+			}
+		}
+	}
 	s.remapRefs(pairs)
 	if a := s.analyses[tx.Path]; a != nil && len(skipped) == 0 {
 		c := *a
@@ -573,6 +598,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path     string
 		Selected []int
+		Repair   *bool
 	}
 	if err := readBody(r, &req); err != nil {
 		fail(w, http.StatusBadRequest, err)
@@ -583,7 +609,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err)
 		return
 	}
-	tx, err := s.apply(rel, req.Selected)
+	tx, err := s.apply(rel, req.Selected, req.Repair == nil || *req.Repair)
 	if err != nil {
 		fail(w, http.StatusConflict, err)
 		return

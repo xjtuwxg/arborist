@@ -42,7 +42,11 @@ func main() {
 		os.Exit(2)
 	}
 
-	found, stats, err := refs.Scan(root, refs.Options{MaxFileSize: *maxSize})
+	found, stats, err := refs.Scan(root, refs.Options{MaxFileSize: *maxSize, Progress: func(n int64) {
+		if n%200000 == 0 {
+			fmt.Fprintf(os.Stderr, "%d files seen\n", n)
+		}
+	}})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "arb refs:", err)
 		os.Exit(1)

@@ -2,7 +2,7 @@
 
 **An agentic file manager that can reorganize a workspace without breaking it.**
 
-Personal and lab machines rot: projects drift away from the folder they were
+Personal and development machines rot: projects drift away from the folder they were
 created in, duplicates pile up, dead experiments sit next to live ones. LLM
 agents are now good at deciding where things *should* go. They are bad at
 moving them, because a move is not a classification problem. Paths are
@@ -49,8 +49,16 @@ stays the same across restarts. Per folder you can:
   They stay there, intact, until you restore them or delete them one at a
   time by typing the entry's name. That is the only code path that deletes.
 
-Applying does not repair references yet. The dry run says how many will stop
-resolving; undo restores them.
+- *Reference repair*: on apply, absolute paths that pointed at a moved entry
+  are rewritten to the new path, in text files and symlinks, using the scan
+  data. Each edited file is copied into the journal first and undo puts the
+  exact bytes back; a file you changed after the repair is left alone and
+  reported. Log files are never rewritten. Repair only knows what the scan
+  saw: scan before you reorganize.
+
+Not repaired yet: paths built at run time, files over the scan's size limit,
+references from outside the workspace (shell rc files, crontab, agent state
+under `~/.claude` and `~/.codex`).
 
 With `--tailscale` the printed link uses the machine's tailnet address and
 works from any device on the tailnet, no SSH tunnel needed.
@@ -77,7 +85,7 @@ were carried out with a plain `mv`.
 |---|---|---|
 | Reference graph | what breaks if X moves | `internal/refs` (started) |
 | Transactional move + undo | apply a plan, journal it, roll back | `internal/ui/apply.go` (renames only); agent-state migration from [AgentReRoot](https://github.com/xjtuwxg/AgentReRoot) to do |
-| Reference repair | rewrite or regenerate what a move breaks | to do |
+| Reference repair | rewrite or regenerate what a move breaks | `internal/ui/repair.go` (rewrite; regenerating environments to do) |
 | Semantic index | per-file and per-folder summaries and embeddings in a sidecar database, no new file system | to do |
 | Views before moves | show the proposed layout virtually, materialize after review | to do |
 | Agent loop | propose, dry-run, apply, verify | propose only (`internal/providers`) |

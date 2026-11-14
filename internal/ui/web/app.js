@@ -337,7 +337,7 @@ async function preview(name) {
 
 // ---- dry run --------------------------------------------------------------
 
-const dry = { selected: null, plan: null };
+const dry = { selected: null, plan: null, repair: true };
 
 function treeNode(n) {
   const note = n.state === 'leaving' ? '→ ' + n.other
@@ -379,8 +379,18 @@ async function refreshDry() {
   const lines = [h('div', { class: 'big' }, `${plural(plan.moves.length, 'entry', 'entries')} will move. Nothing is deleted or overwritten.`)];
   if (trashed) lines.push(h('div', { class: 'muted' }, `${plural(trashed, 'entry', 'entries')} ${trashed === 1 ? 'goes' : 'go'} to the Trash and ${trashed === 1 ? 'stays' : 'stay'} there until you delete ${trashed === 1 ? 'it' : 'them'} yourself.`));
   if (plan.breaks) {
-    lines.push(h('div', { class: 'impact breaks' },
-      `${plural(plan.breaks, 'absolute reference')} will stop resolving. Arborist does not repair references yet; Undo puts everything back.`));
+    const left = plan.breaks - plan.repairs;
+    lines.push(h('label', { class: 'check' },
+      h('input', { type: 'checkbox', checked: dry.repair, onchange: (ev) => { dry.repair = ev.target.checked; refreshDry(); } }),
+      `Rewrite references to the new paths (${plural(plan.repairs, 'reference')} in ${plural(plan.files, 'file')})`));
+    if (dry.repair) {
+      lines.push(h('div', { class: 'impact safe' },
+        `${plural(plan.breaks, 'absolute reference')} ${plan.breaks === 1 ? 'points' : 'point'} at these entries. ${plan.repairs.toLocaleString()} will be rewritten; each edited file is backed up and Undo restores it.`));
+      if (left) lines.push(h('div', { class: 'impact unknown' }, `${plural(left, 'reference')} in log files will keep the old path.`));
+    } else {
+      lines.push(h('div', { class: 'impact breaks' }, `${plural(plan.breaks, 'absolute reference')} will stop resolving until you undo.`));
+    }
+    if (plan.unscanned) lines.push(h('div', { class: 'impact unknown' }, 'Some entries have no reference scan; references to them are unknown and will not be repaired.'));
   } else if (plan.unscanned) {
     lines.push(h('div', { class: 'impact unknown' }, 'Some entries have no reference scan, so breakage is unknown. Scan references first to see it.'));
   } else if (plan.moves.length) {
@@ -411,9 +421,11 @@ $('#dry-apply').addEventListener('click', async () => {
   const btn = $('#dry-apply');
   btn.disabled = true;
   try {
-    const tx = await api('/api/apply', { path: state.path, selected: dry.selected });
+    const tx = await api('/api/apply', { path: state.path, selected: dry.selected, repair: dry.repair });
     closeDry();
-    toast(`Moved ${plural(tx.moves.length, 'entry', 'entries')}.`, { action: { label: 'Undo', run: () => undo(tx.id) } });
+    const fixed = (tx.edits || []).reduce((n, e) => n + e.count, 0);
+    if ((tx.problems || []).length) toast(`${plural(tx.problems.length, 'file')} could not be repaired. See History.`, { bad: true });
+    toast(`Moved ${plural(tx.moves.length, 'entry', 'entries')}` + (fixed ? ` and rewrote ${plural(fixed, 'reference')}.` : '.'), { action: { label: 'Undo', run: () => undo(tx.id) } });
   } catch (err) {
     toast(err.message, { bad: true });
     await refreshDry();
@@ -450,6 +462,9 @@ async function loadHistory() {
         h('span', { class: 'spacer' }),
         tx.id === d.undoable ? h('button', { onclick: () => undo(tx.id) }, 'Undo') : null),
       tx.error ? h('div', { class: 'conflict' }, tx.error) : null,
+      (tx.edits || []).length ? h('p', { class: 'muted', style: 'margin-top:8px' },
+        `References rewritten in ${plural(tx.edits.length, 'file')}: ` + tx.edits.slice(0, 6).map((e) => e.file).join(', ') + (tx.edits.length > 6 ? ', …' : '')) : null,
+      (tx.problems || []).map((p) => h('div', { class: 'conflict' }, 'Not repaired: ' + p)),
       h('div', { class: 'moves' }, tx.moves.map((m) => h('div', {},
         h('span', { class: 'tag op ' + m.op }, m.op), ' ', m.from, h('span', { class: 'muted' }, ' → '), m.to,
         m.purged ? h('span', { class: 'tag dead', style: 'margin-left:6px' }, 'deleted') : null,
@@ -515,7 +530,7 @@ async function pollJobs() {
     if (j.status === 'running') {
       running = true;
       const secs = Math.round((Date.now() - new Date(j.started)) / 1000);
-      text = `${j.kind === 'scan' ? 'Scanning' : 'Analyzing'} ${where}… ${secs}s`;
+      text = `${j.kind === 'scan' ? 'Scanning' : 'Analyzing'} ${where}… ${secs}s` + (j.detail ? ` · ${j.detail}` : '');
     } else if (j.status === 'failed') {
       text = `${j.kind === 'scan' ? 'Scan' : 'Analysis'} of ${where} failed: ${j.error}`;
     } else {

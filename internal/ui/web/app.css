@@ -183,6 +183,9 @@ pre.preview { margin: 0; font: 12px/1.55 var(--mono); white-space: pre-wrap; ove
 .conflict { background: var(--red-bg); color: var(--red); border-radius: 8px; padding: 8px 10px; margin: 8px 0 0; font-size: 12.5px; }
 #dry-summary { display: flex; flex-direction: column; gap: 3px; max-width: 760px; }
 #dry-summary .big { font-weight: 650; }
+#dry-summary .impact { align-self: flex-start; }
+.check { display: flex; gap: 7px; align-items: center; cursor: pointer; }
+.check input { accent-color: var(--accent); }
 
 /* ---- footer and toasts ---- */
 #jobs { padding: 4px 18px 10px; font-size: 12.5px; color: var(--muted); min-height: 28px; display: flex; gap: 16px; flex-wrap: wrap; }
