@@ -15,20 +15,41 @@ able to undo.
 
 Status: research prototype. See [docs/research-plan.md](docs/research-plan.md).
 
+## Install
+
+Arborist is one self-contained program, `arb`. It needs nothing else on the
+machine: the web interface is built in.
+
+From a release package (`linux-amd64`, `linux-arm64`, `darwin-arm64` for Apple
+silicon, `darwin-amd64` for Intel Macs):
+
+```bash
+tar xzf arborist-<version>-<os>-<arch>.tar.gz
+install -m 755 arborist-*/arb ~/.local/bin/arb    # any folder on your PATH
+arb version
+```
+
+On a Mac, a package downloaded with a browser is quarantined; clear that once
+with `xattr -d com.apple.quarantine ~/.local/bin/arb`. Copies made with `scp`
+or `curl` are not affected.
+
+From source, with Go 1.26 or newer: `go build -o arb ./cmd/arb`. To build the
+packages for all four platforms into `dist/`: `scripts/dist.sh [version]`.
+
 ## What works today
 
 ```bash
-go build -o arb ./cmd/arb
-./arb ui ~/workspace                 # web interface on 127.0.0.1:7878
-./arb ui ~/workspace --tailscale     # same, on this machine's Tailscale address
-./arb refs ~/workspace               # reference summary by category
-./arb refs ~/workspace --json > scan.json   # --ignore a,b  --no-cache
-./arb whatif ~/workspace --refs scan.json
+arb ui ~/workspace                 # web interface on 127.0.0.1:7878
+arb ui ~/workspace --tailscale     # same, on this machine's Tailscale address
+arb refs ~/workspace               # reference summary by category
+arb refs ~/workspace --json > scan.json   # --ignore a,b  --no-cache
+arb whatif ~/workspace --refs scan.json
 ```
 
 The workspace changes only when you confirm the preview in the web interface.
 Even then Arborist only renames: it never overwrites and never deletes on its
-own. Its journal and cache live in `~/.cache/arborist` on Linux.
+own. Its journal and cache live in `~/.cache/arborist` on Linux and
+`~/Library/Caches/arborist` on macOS.
 
 **Web interface (`arb ui`).** A file browser over one workspace root. It
 prints a link that carries an access token; the token is stored so the link

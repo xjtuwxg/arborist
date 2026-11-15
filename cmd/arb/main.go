@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -18,7 +19,14 @@ import (
 	"github.com/xjtuwxg/arborist/internal/refs"
 )
 
+// version is set by scripts/dist.sh.
+var version = "dev"
+
 func main() {
+	if len(os.Args) >= 2 && (os.Args[1] == "version" || os.Args[1] == "--version") {
+		fmt.Printf("arb %s %s/%s\n", version, runtime.GOOS, runtime.GOARCH)
+		return
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "ui" {
 		runUI(os.Args[2:])
 		return
@@ -28,7 +36,7 @@ func main() {
 		return
 	}
 	if len(os.Args) < 2 || os.Args[1] != "refs" {
-		fmt.Fprintln(os.Stderr, "usage:\n  arb refs <root> [--json] [--ignore patterns] [--no-cache]\n  arb refs --from scan.json\n  arb ui [root] [--listen addr] [--tailscale] [--refs scan.json]\n  arb whatif <root> --refs scan.json [--json]")
+		fmt.Fprintln(os.Stderr, "usage:\n  arb refs <root> [--json] [--ignore patterns] [--no-cache]\n  arb refs --from scan.json\n  arb ui [root] [--listen addr] [--tailscale] [--refs scan.json]\n  arb whatif <root> --refs scan.json [--json]\n  arb version")
 		os.Exit(2)
 	}
 	fl := flag.NewFlagSet("refs", flag.ExitOnError)

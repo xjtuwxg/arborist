@@ -26,7 +26,11 @@ func runUI(args []string) {
 		root = "."
 	}
 	if *tailscale {
-		out, err := exec.Command("tailscale", "ip", "-4").Output()
+		bin := "tailscale"
+		if _, err := exec.LookPath(bin); err != nil { // the macOS app keeps its command line tool inside the bundle
+			bin = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+		}
+		out, err := exec.Command(bin, "ip", "-4").Output()
 		ip := strings.TrimSpace(strings.SplitN(string(out), "\n", 2)[0])
 		if err != nil || net.ParseIP(ip) == nil {
 			fmt.Fprintln(os.Stderr, "arb ui: could not get the Tailscale address (is tailscale running?)")
