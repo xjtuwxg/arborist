@@ -1,140 +1,98 @@
 # Arborist
 
-**An agentic file manager that can reorganize a workspace without breaking it.**
+**A file manager that tidies a messy workspace with AI, without breaking what
+points into it.**
 
-Personal and development machines rot: projects drift away from the folder they were
-created in, duplicates pile up, dead experiments sit next to live ones. LLM
-agents are now good at deciding where things *should* go. They are bad at
-moving them, because a move is not a classification problem. Paths are
-referenced from scripts, configs, virtual environments, build caches, git
-worktrees and agent memory, and a plain `mv` breaks all of them silently.
+Workspaces rot: projects drift away from where they started, duplicates pile
+up, dead experiments sit next to live ones. An AI model is good at deciding
+where things should go. Moving them is the hard part, because scripts,
+configs, virtual environments and build files refer to the old paths, and a
+plain `mv` breaks them silently.
 
-Arborist treats reorganization as **refactoring a file system**: find what
-refers to what, move things as a transaction, repair the references, and be
-able to undo.
+Arborist looks at a folder, proposes how to reorganize it, shows you the
+result next to what you have now, and moves things only after you confirm.
+It rewrites the paths that pointed at what moved, and it can undo.
 
-Status: research prototype. See [docs/research-plan.md](docs/research-plan.md).
+![Reviewing a reorganization before anything moves](docs/images/tidy-up.png)
+
+- **Nothing moves until you confirm**, and you can untick any step.
+- **Nothing is deleted.** Things to remove go to a trash folder and stay
+  there until you delete them yourself.
+- **Undo** puts everything back, including the files whose paths were
+  rewritten.
+- **No API keys.** It uses an AI tool you are already signed in to on the
+  machine: Claude Code, Codex, Gemini CLI, opencode or Ollama.
+
+Status: research prototype. Try it on a copy or a small folder first.
 
 ## Install
 
-Arborist is one self-contained program, `arb`. It needs nothing else on the
-machine: the web interface is built in.
+Arborist is one program, `arb`, with nothing else to install. Packages exist
+for Linux and macOS, on Intel/AMD (`amd64`) and ARM (`arm64`) processors.
 
-From a release package (`linux-amd64`, `linux-arm64`, `darwin-arm64` for Apple
-silicon, `darwin-amd64` for Intel Macs):
+This picks the right package for the machine it runs on:
 
 ```bash
-tar xzf arborist-<version>-<os>-<arch>.tar.gz
-install -m 755 arborist-*/arb ~/.local/bin/arb    # any folder on your PATH
+os=$(uname -s | tr A-Z a-z); arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+curl -fsSL "https://github.com/xjtuwxg/arborist/releases/download/v0.1.0/arborist-0.1.0-$os-$arch.tar.gz" | tar xz
+mkdir -p ~/.local/bin && install -m 755 "arborist-0.1.0-$os-$arch/arb" ~/.local/bin/arb
 arb version
 ```
 
-On a Mac, a package downloaded with a browser is quarantined; clear that once
-with `xattr -d com.apple.quarantine ~/.local/bin/arb`. Copies made with `scp`
-or `curl` are not affected.
+If `arb` is not found afterwards, add `~/.local/bin` to your `PATH`, or
+install into another folder that is on it, such as `/usr/local/bin`.
 
-From source, with Go 1.26 or newer: `go build -o arb ./cmd/arb`. To build the
-packages for all four platforms into `dist/`: `scripts/dist.sh [version]`.
+Or download a package by hand from the
+[releases page](https://github.com/xjtuwxg/arborist/releases):
 
-## What works today
+| Machine | Package |
+|---|---|
+| Linux, Intel or AMD | `arborist-0.1.0-linux-amd64.tar.gz` |
+| Linux, ARM | `arborist-0.1.0-linux-arm64.tar.gz` |
+| Mac with Apple silicon | `arborist-0.1.0-darwin-arm64.tar.gz` |
+| Mac with Intel | `arborist-0.1.0-darwin-amd64.tar.gz` |
+
+On a Mac, a package downloaded with a browser is blocked the first time.
+Clear that once with `xattr -d com.apple.quarantine ~/.local/bin/arb`.
+Packages fetched with `curl`, as above, are not affected.
+
+Windows is not supported.
+
+## Use
+
+Start the web interface on the folder you want to tidy and open the link it
+prints:
 
 ```bash
-arb ui ~/workspace                 # web interface on 127.0.0.1:7878
-arb ui ~/workspace --tailscale     # same, on this machine's Tailscale address
-arb refs ~/workspace               # reference summary by category
-arb refs ~/workspace --json > scan.json   # --ignore a,b  --no-cache
-arb whatif ~/workspace --refs scan.json
+arb ui ~/workspace
 ```
 
-The workspace changes only when you confirm the preview in the web interface.
-Even then Arborist only renames: it never overwrites and never deletes on its
-own. Its journal and cache live in `~/.cache/arborist` on Linux and
-`~/Library/Caches/arborist` on macOS.
+To reach it from another device, for example a server you use over
+[Tailscale](https://tailscale.com), start it on the machine's tailnet address:
 
-**Web interface (`arb ui`).** A file browser over one workspace root. It
-prints a link that carries an access token; the token is stored so the link
-stays the same across restarts. Per folder you can:
+```bash
+arb ui ~/workspace --tailscale
+```
 
-- *Scan references*: find absolute paths (symlinks and text files) that point
-  into the workspace, see what points into a folder and what its files point
-  to, and which references are already dangling.
-- *Analyze*: describe every entry, label it by topic and activity, and propose
-  `move` / `merge` / `archive` / `trash` steps. Each proposal shows how many
-  references the move would break.
-- *Tidy up*: see the folder as it is now next to how it would look, untick
-  steps you do not want, then apply. A plan with any conflict (a destination
-  that already exists, an entry that vanished) is refused as a whole.
-- *History*: every applied plan is journaled; the most recent one can be
-  undone, which puts each entry back at its old path.
-- *Trash*: `trash` steps move entries into `_trash/` at the workspace root.
-  They stay there, intact, until you restore them or delete them one at a
-  time by typing the entry's name. That is the only code path that deletes.
+Then, in the browser:
 
-- *Reference repair*: on apply, absolute paths that pointed at a moved entry
-  are rewritten to the new path, in text files and symlinks, using the scan
-  data. Each edited file is copied into the journal first and undo puts the
-  exact bytes back; a file you changed after the repair is left alone and
-  reported. Log files are never rewritten. Repair only knows what the scan
-  saw: scan before you reorganize.
+1. **Scan references** finds the paths that point into the folder, so
+   Arborist knows what a move would break. The first scan of a very large
+   folder is slow; later ones reuse it.
+2. **Analyze** asks the AI tool to describe each entry and propose moves.
+   It sends folder names and the first lines of README files to that tool.
+3. **Tidy up…** shows the folder as it is next to how it would look. Untick
+   what you do not want, then confirm.
 
-**Scans are incremental.** The first scan of a large workspace on a spinning
-disk is slow, because every text file is read. Later scans reuse what was
-found in any folder whose files have the same names, sizes and modification
-times, and open only files in folders that changed. The command line and the
-web interface share the cache (`--no-cache` rereads everything). Even an
-unchanged workspace still has every file's metadata looked at, which takes
-minutes on millions of files; the scan shows how far it is against the number
-of files the previous scan saw, with an estimate of the time left.
+![Browsing a workspace with the AI's description of each entry](docs/images/files.png)
 
-**Leaving folders out.** Lines in `.arboristignore` in the workspace root name
-folders and files that scans skip: `/data/trees` is a path from the root,
-`node_modules` or `*.ckpt` match a name anywhere. The web interface has an
-"Exclude from scans" button per folder that edits this file. References
-inside an excluded folder are unknown, so the dry run says when a move
-touches one.
+The link carries an access token; anyone with the link can use the
+interface, so treat it like a password.
 
-Not repaired yet: paths built at run time, files over the scan's size limit,
-references from outside the workspace (shell rc files, crontab, agent state
-under `~/.claude` and `~/.codex`).
+## More
 
-With `--tailscale` the printed link uses the machine's tailnet address and
-works from any device on the tailnet, no SSH tunnel needed.
+- [Guide](docs/guide.md): every command, how scans, repair, undo and the
+  trash work, and what is not handled yet.
+- [Research plan](docs/research-plan.md)
 
-**AI without setup.** On start Arborist looks for AI command-line tools that
-are already installed and signed in (Claude Code, Codex, Gemini CLI, opencode,
-Ollama) and uses one of them; there are no API keys to enter. The sidebar
-lets you pick the provider and the model (suggestions come from the tool where
-it can list them; "Other…" takes any model name the tool accepts). Detection
-only checks that a tool's credential file exists and never reads it. Because
-a credential file can outlive the login, Arborist also sends each tool a
-one-word prompt, at most once a day or when you press *Check sign-ins*; tools
-and models that do not answer are greyed out with the reason and the command
-that signs in again. For Claude Code the same check shows which model each
-alias (`opus`, `sonnet`, `haiku`) currently means. The tool is run in an
-empty directory with its own tools disabled or read-only, because folder names
-and README text are untrusted input. Analysis sends folder names and the first
-lines of README files to the chosen tool.
-
-**Measurement (`arb refs`, `arb whatif`).** `refs` reports every absolute
-reference with the kind of file it lives in (`authored`, `build`,
-`python-env`, `node`, `git`, `agent`, `log`, `data`). The kind comes from the
-path alone, so `arb refs --from scan.json` re-summarizes a stored scan under
-the current rules without touching the disk. `whatif` takes the AI proposals
-stored by the UI and counts the references that would stop resolving if they
-were carried out with a plain `mv`.
-
-## Planned pieces
-
-| Piece | Role | Source |
-|---|---|---|
-| Reference graph | what breaks if X moves | `internal/refs` (started) |
-| Transactional move + undo | apply a plan, journal it, roll back | `internal/ui/apply.go` (renames only); agent-state migration from [AgentReRoot](https://github.com/xjtuwxg/AgentReRoot) to do |
-| Reference repair | rewrite or regenerate what a move breaks | `internal/ui/repair.go` (rewrite; regenerating environments to do) |
-| Semantic index | per-file and per-folder summaries and embeddings in a sidecar database, no new file system | to do |
-| Views before moves | show the proposed layout virtually, materialize after review | to do |
-| Agent loop | propose, dry-run, apply, verify | propose only (`internal/providers`) |
-| File manager UI | browse, review proposals, undo | `internal/ui` |
-
-AgentReRoot keeps its packages under `internal/`, so they cannot be imported
-from this module yet. Either call the `reroot` binary or move its engine to a
-public package first.
+The screenshots show a made-up workspace.
